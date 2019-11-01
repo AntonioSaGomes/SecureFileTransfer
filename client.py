@@ -153,7 +153,6 @@ class ClientProtocol(asyncio.Protocol):
 			return
 
 		mtype = message.get('type', None)
-		print(mtype)
 		#message used for choosing the algorithms used in the session
 		if mtype == 'RSA_EXCHANGE':		
 			
@@ -220,8 +219,8 @@ class ClientProtocol(asyncio.Protocol):
 		elif mtype == 'ERROR':
 			logger.warning("Got error from server: {}".format(message.get('data', None)))
 		else:
-			print (mtype)
-			logger.warning("Invalid message type")
+			print(mtype)
+			logger.warning("Invalid message type: {}".format(message['type']))
 
 		self.transport.close()
 		self.loop.stop()
@@ -279,6 +278,7 @@ class ClientProtocol(asyncio.Protocol):
 
 		#need to encrypt message
 		message_b = (json.dumps(message) + '\r\n').encode()
+		print(message)
 		self.transport.write(message_b)
 
 
