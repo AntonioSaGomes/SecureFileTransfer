@@ -14,6 +14,8 @@ STATE_CONNECT = 0
 STATE_OPEN = 1
 STATE_DATA = 2
 STATE_CLOSE= 3
+STATE_NEGOTIATION = 4
+STATE_EXCHANGE = 5
 
 #GLOBAL
 storage_dir = 'files'
@@ -91,17 +93,20 @@ class ClientHandler(asyncio.Protocol):
 			return
 
 		mtype = message.get('type', "").upper()
+		print(mtype)
 
 		if mtype == 'OPEN':
 			ret = self.process_open(message)
-		elif mtype == 'EXCHANGE':
-			ret = self.process_exchange(message)
+		elif mtype == 'RSA_EXCHANGE':
+			ret = self.process_RSA_exchange(message)
+		elif mtype == 'DH_EXCHANGE':
+			ret = self.process_DH_exchange(message)
 		elif mtype == 'DATA':
 			ret = self.process_data(message)
 		elif mtype == 'CLOSE':
 			ret = self.process_close(message)
 		elif mtype == 'NEGOTIATION':
-			ret = self.process_negotion(message)
+			ret = self.process_negotiation(message)
 			
 		else:
 			logger.warning("Invalid message type: {}".format(message['type']))
@@ -121,49 +126,87 @@ class ClientHandler(asyncio.Protocol):
 			self.state = STATE_CLOSE
 			self.transport.close()
 	
-	def process_exchange(self, message: str) -> bool:
-		
-		parameters = message['parameters']		
 
-		client_public_key = message['client_public_key']
+	def process_negotiation(self, message: str) -> bool:
+		"""
+		Processes an NEGOTIATION message from the client
+		This message should contain the cript object that contains the algorithms 
+		suggested for the encription  to 
+		ensure a safe comunication during this session.
+
+		:param message: The message to process
+		:return: Boolean indicating the success of the operation
+		"""
+			
+		self.cript = json.loads(message['cript'])
+		if not self.validate_negotiation(self.cript) :
+			return False
+
+		message = {'type': 'OK'}
+
+		self._send(message)
+
+		self.state = STATE_EXCHANGE
+		
+		return True
+		
+	def validate_negotiation(self,cript_object):
+		return True
+		
+	def process_RSA_exchange(self, message: str) -> bool:
+		
+		#parameters = message['parameters']		
 		
 		client_rsa_public_key = message['client_rsa_public_key']
 		
-		self.parameters = security.deserializeParameters(parameters)
-		
-		self.client_public_key = security.deserializePublicKey(client_public_key)
-		
 		self.client_rsa_public_key = security.deserializePublicKey(client_rsa_public_key)
-
-		self.private_key,self.public_key = security.get_asymm_keys(self.parameters)
-		
+						
 		self.rsa_private_key,self.rsa_public_key = security.get_rsa_asymn_keys()
-
-
-		shared_key = security.shared_key(self.private_key,self.client_public_key)
-		
-		self.shared_key = security.derive_key(shared_key,self.cript['digest'])
-		
-		public_key = security.serializePublicKey(self.public_key).decode("utf8")
 		
 		rsa_public_key = security.serializePublicKey(self.rsa_public_key).decode("utf8")
 		
-		iv,self.sym_key,self.encryptor = security.encryptor()
+		self.iv,self.sym_key,self.encryptor = security.encryptor()
 		
-		iv_enc = security.encrypt(self.client_rsa_public_key,iv)[0].decode("iso-8859-1")
+		iv_enc = security.encrypt(self.client_rsa_public_key,self.iv)[0].decode("iso-8859-1")
 		
 		sym_key_enc = security.encrypt(self.client_rsa_public_key,self.sym_key)[0].decode("iso-8859-1")
 		
-		message = {'type': 'EXCHANGE','server_public_key':public_key,'server_rsa_public_key':rsa_public_key,'iv_enc':iv_enc,'sym_key_enc':sym_key_enc}
+		message = {'type': 'RSA_EXCHANGE','server_rsa_public_key':rsa_public_key,'iv_enc':iv_enc,'sym_key_enc':sym_key_enc}
 		
 		self._send(message)
-	
-	def process_negotiation(self, message: str) -> bool:
-		hashing_algo = input("Hashing algorithm \n 1)SHA-256 \n 2)SHA-526")
-		cipher_mode = input("Cipher mode \n 1)CBC \n 2)GCM")
-		cipher = input("Cipher \n 1)AES-128 \n 2)Salsa20")
 		
-		pass
+		return True
+	
+	def process_DH_exchange(self, message: str) -> bool:
+		
+		client_dh_public_key = message['client_dh_public_key']
+		
+		parameters = message['enc_parameters'].encode("iso-8859-1")
+		
+		iv,key,self.decryptor = security.decryptor(iv=self.iv,key=self.sym_key)
+		
+		#parameters = security.decrypt(self.decryptor,parameters)[0]
+		
+		self.parameters = security.deserializeParameters(parameters)
+		
+		self.client_dh_public_key = security.deserializePublicKey(client_dh_public_key)
+		
+		self.dh_private_key,self.dh_public_key = security.get_asymm_keys(self.parameters)
+		
+		dh_public_key = security.serializePublicKey(self.dh_public_key).decode("utf8")
+
+		shared_key = security.shared_key(self.dh_private_key,self.client_dh_public_key)
+		
+		self.shared_key = security.derive_key(shared_key,self.cript['digest'])
+				
+
+		message = {'type': 'DH_EXCHANGE','server_dh_public_key':dh_public_key}
+		
+		self._send(message)
+		
+		return True
+
+
 		
 	def process_open(self, message: str) -> bool:
 		"""
@@ -187,16 +230,6 @@ class ClientHandler(asyncio.Protocol):
 		# Only chars and letters in the filename
 		file_name = re.sub(r'[^\w\.]', '', message['file_name'])
 		file_path = os.path.join(self.storage_dir, file_name)
-		self.cript = json.loads(message['cript'])
-		
-		parameters = message['parameters']
-		client_public_key = message['client_public_key']
-		client_rsa_public_key = message['client_rsa_public_key']
-		
-		
-		self.parameters = security.deserializeParameters(parameters)
-		self.client_public_key = security.deserializePublicKey(client_public_key)
-		self.client_rsa_public_key = security.deserializePublicKey(client_rsa_public_key)
 
 		
 		if not os.path.exists("files"):
@@ -213,29 +246,9 @@ class ClientHandler(asyncio.Protocol):
 			logger.exception("Unable to open file")
 			return False
 
-		self.private_key,self.public_key = security.get_asymm_keys(self.parameters)
-		self.rsa_private_key,self.rsa_public_key = security.get_rsa_asymn_keys()
 
 
-		shared_key = security.shared_key(self.private_key,self.client_public_key)
-		
-		self.shared_key = security.derive_key(shared_key,self.cript['digest'])
-
-		
-		public_key = security.serializePublicKey(self.public_key).decode("utf8")
-		rsa_public_key = security.serializePublicKey(self.rsa_public_key).decode("utf8")
-
-		
-		iv,self.sym_key,self.encryptor = security.encryptor()
-		
-		
-		iv_enc = security.encrypt(self.client_rsa_public_key,iv)[0].decode("iso-8859-1")
-		
-		sym_key_enc = security.encrypt(self.client_rsa_public_key,self.sym_key)[0].decode("iso-8859-1")
-		
-		
-
-		message = {'type': 'OK','server_public_key':public_key,'server_rsa_public_key':rsa_public_key,'iv_enc':iv_enc,'sym_key_enc':sym_key_enc}
+		message = {'type': 'OK'}
 		
 
 		
@@ -318,20 +331,7 @@ class ClientHandler(asyncio.Protocol):
 
 		return True
 	
-	def process_negotiation(self,message: str) -> bool:
-		"""
-		Processes a NEGOTIATION message from the client.
-		This message will establish the cipher algorithms to 
-		ensure a safe comunication during this session
-		
-		:param message: THe message to process 
-		:return Boolean indicating the sucess of the operation
-		"""
-		logger.debug("Process Negotiation: {}".format(message))
-		
-		self.cript = message['cript']
-		
-		
+
 		
 		
 	def _send(self, message: str) -> None:

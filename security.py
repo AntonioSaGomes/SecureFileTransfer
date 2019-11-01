@@ -139,8 +139,6 @@ def shared_key(private_key,public_key):
 def encrypt_message(message,public_key,symetric_key):
 	if message != None:	
 		nonce = os.urandom(12)
-		print (nonce)
-		print (symetric_key)
 		message = AESCCM(symetric_key).encrypt(nonce,message.encode("iso-8859-1"),None)
 		nonce, *_ = encrypt(public_key,nonce)
 		message ={'nonce' : nonce.decode("iso-8859-1"),'message':message.decode("iso-8859-1")}
@@ -158,8 +156,6 @@ def decrypt_message(data,symetric_key,private_key):
 	nonce = data['nonce'].encode("iso-8859-1")
 	message = data['message'].encode("iso-8859-1")
 	nonce, *_ = decrypt(private_key,nonce)
-	print (nonce)
-	print(symetric_key)
 	message = AESCCM(symetric_key).decrypt(nonce,message,None)
 	message ={'type':typ,'nonce' : nonce.decode("iso-8859-1"),'message':message.decode("iso-8859-1")}
 	return message
