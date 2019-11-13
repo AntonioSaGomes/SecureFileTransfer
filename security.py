@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import asymmetric
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+from cryptography.fernet import Fernet
 import os 
 import json
 
@@ -38,6 +39,31 @@ def get_asymm_keys(parameters):
 	
 def get_symetric_key():
 	return os.urandom(32)
+
+
+def gen_Fernet_key():
+	key = Fernet.generate_key()
+	return key
+	
+def store_Fernet_key(key,filename):
+	fich = open(str(filename) + '.key', 'wb')
+	fich.write(key) # The key is type bytes still
+	fich.close()
+
+def load_Fernet_key(filename):
+	fich = open(str(filename) +'.key', 'rb')
+	key = fich.read() # The key will be type bytes
+	fich.close()
+	return key
+	
+def fernet_encript(key,message):
+	f = Fernet(key)
+	return f.encrypt(message)
+
+def fernet_decript(key,message):
+	f = Fernet(key)
+	return f.decrypt(message)
+	
 def encryptor(iv = os.urandom(16), key = os.urandom(32), bc = backend,key_type = 'AES128',mode='CBC'):
 	if (key_type == 'AES128'):
 		algo = algorithms.AES(key)
@@ -104,6 +130,7 @@ def serializePrivateKey(private_key):
 		format=serialization.PrivateFormat.PKCS8,
 		encryption_algorithm=serialization.NoEncryption()
 	)
+
 
 def serializePublicKey(public_key):
 	return public_key.public_bytes(

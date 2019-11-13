@@ -33,6 +33,8 @@ class ClientProtocol(asyncio.Protocol):
 		self.state = STATE_CONNECT  # Initial State
 		self.buffer = ''  # Buffer to receive data chunks
 		self.cript = Cript('AES128','CBC','SHA256')
+		self.fernet_filename = "fernet_key"
+
 
 	def connection_made(self, transport) -> None:
 		"""
@@ -42,6 +44,8 @@ class ClientProtocol(asyncio.Protocol):
 		:return: No return
 		"""
 		self.transport = transport
+		
+		self.fernet_key = security.load_Fernet_key(self.fernet_filename)
 
 		logger.debug('Connected to Server')
 		
@@ -51,7 +55,105 @@ class ClientProtocol(asyncio.Protocol):
 
 		self.state = STATE_OPEN
 
-	def send_negotiation(self) -> None:
+	def data_received(self, data: str) -> None:
+		"""
+		Called when data is received from the server.
+		Stores the data in the buffer
+
+		:param data: The data that was received. This may not be a complete JSON message
+		:return:
+		"""
+		
+		logger.debug('Received: {}'.format(data))
+	
+		data = security.fernet_decript(self.fernet_key,data)
+		
+		try:
+			self.buffer += data.decode()
+		except:
+			logger.exception('Could not decode data from client')
+
+		idx = self.buffer.find('\r\n')
+
+		while idx >= 0:  # While there are separators
+			frame = self.buffer[:idx + 2].strip()  # Extract the JSON object
+			self.buffer = self.buffer[idx + 2:]  # Removes the JSON object from the buffer
+			self.on_frame(frame)  # Process the frame
+			idx = self.buffer.find('\r\n')
+
+		if len(self.buffer) > 4096 * 1024 * 1024:  # If buffer is larger than 4M
+			logger.warning('Buffer to large')
+			self.buffer = ''
+			self.transport.close()
+
+	def on_frame(self, frame: str) -> None:
+		"""
+		Processes a frame (JSON Object)
+
+		:param frame: The JSON Object to process
+		:return:
+		"""
+
+		#logger.debug("Frame: {}".format(frame))
+		try:
+			message = json.loads(frame)
+		except:
+			print("im here EXCEPT")
+
+			logger.exception("Could not decode the JSON message")
+			self.transport.close()
+			return
+
+		mtype = message['type']
+
+		#message used for choosing the algorithms used in the session
+		if mtype == 'RSA_EXCHANGE':		
+			print("Im here RSA_EXCHANGE going to DH_EXCHANGE")
+			self.send_dh_exchange(message)
+			
+			
+		elif mtype == 'DH_EXCHANGE':		
+			print ("i got here")
+			self.send_file(message,self.file_name)
+			
+
+		elif mtype == 'OK':  # Server replied OK. We can advance the state
+			if self.state == STATE_OPEN:
+				print("im here STATE_OPEN")
+				self.send_negotiation(message)
+				#self.send_file(self.file_name)
+			elif self.state == STATE_DATA:  # Got an OK during a message transfer.
+				# Reserved for future use
+				print("im here STATE_DATA")
+				pass
+			elif self.state == STATE_NEGOTIATION:
+				print("im here STATE_NEGOTIATION")
+				self.send_exchange(message)
+			else:
+				logger.warning("Ignoring message from server")
+			return
+
+		elif mtype == 'ERROR':
+			logger.warning("Got error from server: {}".format(message.get('data', None)))
+		else:
+			print(mtype)
+			logger.warning("Invalid message type: {}".format(message['type']))
+
+		print("I got here for some reason but I shouldn't!")
+		#self.transport.close()
+		#self.loop.stop()
+
+	def connection_lost(self, exc):
+		"""
+		Connection was lost for some reason.
+		:param exc:
+		:return:
+		"""
+		logger.info('The server closed the connection')
+		self.loop.stop()
+
+
+	def send_negotiation(self,message: str) -> None:
 		"""
 		Called when the client connects
 		
@@ -77,21 +179,22 @@ class ClientProtocol(asyncio.Protocol):
 			if cipher_mode == 1:
 				self.cript.mode = "CBC"
 			else : 
-				self.cript.digest = "GCM"
+				self.cript.mode = "GCM"
 		while cipher not in [1,2]:
 			cipher = int(input("Cipher \n 1)AES128 \n 2)CHACHA20\n"))
 			if cipher == 1:
-				self.cript.mode = "AES128"
+				self.cript.algo = "AES128"
 			else : 
-				self.cript.digest = "CHACHA20"
+				self.cript.algo = "CHACHA20"
 	
 		cript = self.cript.toJson()
 		message = {'type':'NEGOTIATION','cript':cript}
 		self._send(message)
 		
 		self.state = STATE_NEGOTIATION
-	
-	def send_exchange(self) -> None:
+		
+		
+	def send_exchange(self,message: str) -> None:
 		"""
 		Called when rsa_keys and dh_keys need to be exchanged
 
@@ -108,139 +211,56 @@ class ClientProtocol(asyncio.Protocol):
 
 		self.state = STATE_EXCHANGE
 		
-	def data_received(self, data: str) -> None:
-		"""
-		Called when data is received from the server.
-		Stores the data in the buffer
-
-		:param data: The data that was received. This may not be a complete JSON message
-		:return:
-		"""
-		logger.debug('Received: {}'.format(data))
-		try:
-			self.buffer += data.decode()
-		except:
-			logger.exception('Could not decode data from client')
-
-		idx = self.buffer.find('\r\n')
-
-		while idx >= 0:  # While there are separators
-			frame = self.buffer[:idx + 2].strip()  # Extract the JSON object
-			self.buffer = self.buffer[idx + 2:]  # Removes the JSON object from the buffer
-
-			self.on_frame(frame)  # Process the frame
-			idx = self.buffer.find('\r\n')
-
-		if len(self.buffer) > 4096 * 1024 * 1024:  # If buffer is larger than 4M
-			logger.warning('Buffer to large')
-			self.buffer = ''
-			self.transport.close()
-
-	def on_frame(self, frame: str) -> None:
-		"""
-		Processes a frame (JSON Object)
-
-		:param frame: The JSON Object to process
-		:return:
-		"""
-
-		#logger.debug("Frame: {}".format(frame))
-		try:
-			message = json.loads(frame)
-		except:
-			logger.exception("Could not decode the JSON message")
-			self.transport.close()
-			return
-
-		mtype = message.get('type', None)
-		#message used for choosing the algorithms used in the session
-		if mtype == 'RSA_EXCHANGE':		
-			
-			server_rsa_public_key = message['server_rsa_public_key']
-
-			self.server_rsa_public_key = security.deserializePublicKey(server_rsa_public_key)
-						
-			iv_enc = message['iv_enc'].encode("iso-8859-1")
-			
-			sym_key_enc = message['sym_key_enc'].encode("iso-8859-1")
-			
-			iv = security.decrypt(self.rsa_private_key,iv_enc)[0]
-			
-			self.sym_key = security.decrypt(self.rsa_private_key,sym_key_enc)[0]
-			
-			iv,key,self.decryptor = security.decryptor(iv=iv,key=self.sym_key)
-			
-			iv,key,self.encryptor = security.encryptor(iv=iv,key=self.sym_key)
-			
-			self.parameters = security.gen_parameters()
 		
-			self.dh_private_key,self.dh_public_key = security.get_asymm_keys(self.parameters)
-			
-			dh_public_key = security.serializePublicKey(self.dh_public_key).decode("utf8")
-			
-			parameters = security.serializeParameters(self.parameters).decode("utf8")
-			
-			#enc_parameters = security.encrypt(self.encryptor,parameters)[0]
-			
-			message = {'type': 'DH_EXCHANGE', 'client_dh_public_key':dh_public_key,'enc_parameters':parameters}
-			
-			self._send(message)
-			
-		if mtype == 'DH_EXCHANGE':		
-			
-			print("im here")
-			server_dh_public_key = message['server_dh_public_key']
-			
-			self.server_dh_public = security.deserializePublicKey(server_dh_public_key)
-			
-			#shared key used for encryption of the file content
-			
-			shared_key = security.shared_key(self.private_key,self.server_dh_public_key)
+	def send_dh_exchange(self,message: str) -> None:
 		
-			self.shared_key = security.derive_key(shared_key,self.cript.digest)
+		server_rsa_public_key = message['server_rsa_public_key']
+
+		self.server_rsa_public_key = security.deserializePublicKey(server_rsa_public_key)
+					
+		iv_enc = message['iv_enc'].encode("iso-8859-1")
+		
+		sym_key_enc = message['sym_key_enc'].encode("iso-8859-1")
+		
+		iv = security.decrypt(self.rsa_private_key,iv_enc)[0]
+		
+		self.sym_key = security.decrypt(self.rsa_private_key,sym_key_enc)[0]
+		
+		iv,key,self.decryptor = security.decryptor(iv=iv,key=self.sym_key)
+		
+		iv,key,self.encryptor = security.encryptor(iv=iv,key=self.sym_key)
+		
+		self.parameters = security.gen_parameters()
+		
+		self.dh_private_key,self.dh_public_key = security.get_asymm_keys(self.parameters)
 			
-			self.send_file(self.file_name)
-
-		if mtype == 'OK':  # Server replied OK. We can advance the state
-			if self.state == STATE_OPEN:
-				
-				self.send_negotiation()
-
-				#self.send_file(self.file_name)
-			elif self.state == STATE_DATA:  # Got an OK during a message transfer.
-				# Reserved for future use
-				pass
-			elif self.state == STATE_NEGOTIATION:
-				self.send_exchange()
-			else:
-				logger.warning("Ignoring message from server")
-			return
-
-		elif mtype == 'ERROR':
-			logger.warning("Got error from server: {}".format(message.get('data', None)))
-		else:
-			print(mtype)
-			logger.warning("Invalid message type: {}".format(message['type']))
-
-		self.transport.close()
-		self.loop.stop()
-
-	def connection_lost(self, exc):
-		"""
-		Connection was lost for some reason.
-		:param exc:
-		:return:
-		"""
-		logger.info('The server closed the connection')
-		self.loop.stop()
-
-	def send_file(self, file_name: str) -> None:
+		dh_public_key = security.serializePublicKey(self.dh_public_key).decode("utf8")
+		
+		parameters = security.serializeParameters(self.parameters).decode("utf8")
+			
+		#enc_parameters = security.encrypt(self.encryptor,parameters)[0]
+			
+		message = {'type': 'DH_EXCHANGE', 'client_dh_public_key':dh_public_key,'enc_parameters':parameters}
+		
+		self._send(message)
+		
+		
+	def send_file(self, message: str,file_name: str) -> None:
 		"""
 		Sends a file to the server.
 		The file is read in chunks, encoded to Base64 and sent as part of a DATA JSON message
 		:param file_name: File to send
 		:return:  None
 		"""
+		server_dh_public_key = message['server_dh_public_key']
+		
+		self.server_dh_public_key = security.deserializePublicKey(server_dh_public_key)
+		
+		#shared key used for encryption of the file content
+		
+		shared_key = security.shared_key(self.dh_private_key,self.server_dh_public_key)
+	
+		self.shared_key = security.derive_key(shared_key,self.cript.digest)
 		
 		iv,key,encryptor = security.encryptor(key = self.shared_key)
 		
@@ -274,11 +294,13 @@ class ClientProtocol(asyncio.Protocol):
 		:param message:
 		:return:
 		"""
-		logger.debug("Send: {}".format(message))
 
 		#need to encrypt message
 		message_b = (json.dumps(message) + '\r\n').encode()
-		print(message)
+		message_b = security.fernet_encript(self.fernet_key,message_b)
+		
+		logger.debug("Send: {}".format(message_b))
+
 		self.transport.write(message_b)
 
 

@@ -33,6 +33,9 @@ class ClientHandler(asyncio.Protocol):
 		self.storage_dir = storage_dir
 		self.buffer = ''
 		self.peername = ''
+		self.fernet_key = security.gen_Fernet_key()
+		self.fernet_filename = "fernet_key"
+		security.store_Fernet_key(self.fernet_key,self.fernet_filename)
 
 	def connection_made(self, transport) -> None:
 		"""
@@ -55,7 +58,11 @@ class ClientHandler(asyncio.Protocol):
         :param data: The data that was received. This may not be a complete JSON message
         :return:
         """
+        
 		logger.debug('Received: {}'.format(data))
+
+		data = security.fernet_decript(self.fernet_key,data)
+
 		try:
 			self.buffer += data.decode()
 		except:
@@ -112,6 +119,7 @@ class ClientHandler(asyncio.Protocol):
 			logger.warning("Invalid message type: {}".format(message['type']))
 			ret = False
 
+		print (mtype,ret)
 		if not ret:
 			try:
 				self._send({'type': 'ERROR', 'message': 'See server'})
@@ -199,11 +207,11 @@ class ClientHandler(asyncio.Protocol):
 		
 		self.shared_key = security.derive_key(shared_key,self.cript['digest'])
 				
-
 		message = {'type': 'DH_EXCHANGE','server_dh_public_key':dh_public_key}
 		
 		self._send(message)
 		
+		self.state = STATE_DATA
 		return True
 
 
@@ -273,23 +281,22 @@ class ClientHandler(asyncio.Protocol):
 		"""
 		logger.debug("Process Data: {}".format(message))
 		
-		data = security.decrypt_message(message,self.sym_key,self.rsa_private_key)
 		if self.state == STATE_OPEN:
 			self.state = STATE_DATA
 			# First Packet
 
 		elif self.state == STATE_DATA:
-			# Next packets
-			pass
+			data = security.decrypt_message(message,self.sym_key,self.rsa_private_key)
+			message = data.get('message',None).replace("'","\"")
+			message = json.loads(message)
+			data = message.get('data', None)
 
 		else:
 			logger.warning("Invalid state. Discarding")
 			return False
 
 		try:
-			message = data.get('message',None).replace("'","\"")
-			message = json.loads(message)
-			data = message.get('data', None)
+
 			if data is None:
 				logger.debug("Invalid message. No data found")
 				return False
@@ -340,9 +347,11 @@ class ClientHandler(asyncio.Protocol):
 		:param message:
 		:return:
 		"""
-		logger.debug("Send: {}".format(message))
-
 		message_b = (json.dumps(message) + '\r\n').encode()
+		message_b = security.fernet_encript(self.fernet_key,message_b)
+		
+		logger.debug("Send: {}".format(message_b))
+
 		self.transport.write(message_b)
 
 def main():
