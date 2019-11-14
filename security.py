@@ -109,16 +109,20 @@ def load_private_key(filename):
 
 	
 def encrypt(encryptor, data, algorithm = asymmetric.padding.OAEP, hashing = hashes.SHA256, mgf = asymmetric.padding.MGF1, label = None):
-    if type(encryptor) == _CipherContext:
-        padder = padding.PKCS7(128).padder()
-        encrypted, data = data[:16], data[16:]
-        encrypted = encryptor.update(encrypted if len(encrypted) == 16 else padder.update(encrypted) + padder.finalize())
-        while len(data) != 0:
-            concatenate, data = data[:16], data[16:]
-            encrypted += encryptor.update(concatenate if len(concatenate) == 16 else padder.update(concatenate) + padder.finalize())
-        return encrypted + encryptor.finalize()
-    else:
-        return encryptor.encrypt(data, algorithm(mgf = mgf(algorithm = hashing()), algorithm = hashing(), label = label)), algorithm, hashing, mgf, label
+	if hashing == 'SHA256':
+		hashing = hashes.SHA256()
+	elif hashing == 'SHA512':
+		hashing = hashes.SHA512()
+	if type(encryptor) == _CipherContext:
+		padder = padding.PKCS7(128).padder()
+		encrypted, data = data[:16], data[16:]
+		encrypted = encryptor.update(encrypted if len(encrypted) == 16 else padder.update(encrypted) + padder.finalize())
+		while len(data) != 0:
+			concatenate, data = data[:16], data[16:]
+			encrypted += encryptor.update(concatenate if len(concatenate) == 16 else padder.update(concatenate) + padder.finalize())
+		return encrypted + encryptor.finalize()
+	else:
+		return encryptor.encrypt(data, algorithm(mgf = mgf(algorithm = hashing()), algorithm = hashing(), label = label)), algorithm, hashing, mgf, label
 
 def decryptor(iv = os.urandom(16), key = os.urandom(32), bc = backend):
 	cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend = bc)
@@ -169,7 +173,6 @@ def encrypt_message(message,public_key,symetric_key):
 		message = AESCCM(symetric_key).encrypt(nonce,message.encode("iso-8859-1"),None)
 		nonce, *_ = encrypt(public_key,nonce)
 		message ={'nonce' : nonce.decode("iso-8859-1"),'message':message.decode("iso-8859-1")}
-	
 	return message
 
 def get_rsa_asymn_keys(public_exponent = 65537, key_size = 2048, bc = backend):
@@ -204,6 +207,10 @@ def derive_key(shared_key,algorithm):
 	return derived_key
 
 def decrypt(decryptor, data, algorithm = asymmetric.padding.OAEP, hashing = hashes.SHA256, mgf = asymmetric.padding.MGF1, label = None):
+	if hashing == 'SHA256':
+		hashing = hashes.SHA256()
+	elif hashing == 'SHA512':
+		hashing = hashes.SHA512()
 	if type(decryptor) == _CipherContext:
 		data = decryptor.update(data) + decryptor.finalize()
 		unpadder = padding.PKCS7(128).unpadder()

@@ -98,36 +98,27 @@ class ClientProtocol(asyncio.Protocol):
 		try:
 			message = json.loads(frame)
 		except:
-			print("im here EXCEPT")
-
 			logger.exception("Could not decode the JSON message")
 			self.transport.close()
 			return
 
 		mtype = message['type']
 
-		#message used for choosing the algorithms used in the session
 		if mtype == 'RSA_EXCHANGE':		
-			print("Im here RSA_EXCHANGE going to DH_EXCHANGE")
 			self.send_dh_exchange(message)
 			
 			
 		elif mtype == 'DH_EXCHANGE':		
-			print ("i got here")
 			self.send_file(message,self.file_name)
 			
 
 		elif mtype == 'OK':  # Server replied OK. We can advance the state
 			if self.state == STATE_OPEN:
-				print("im here STATE_OPEN")
 				self.send_negotiation(message)
-				#self.send_file(self.file_name)
 			elif self.state == STATE_DATA:  # Got an OK during a message transfer.
 				# Reserved for future use
-				print("im here STATE_DATA")
 				pass
 			elif self.state == STATE_NEGOTIATION:
-				print("im here STATE_NEGOTIATION")
 				self.send_exchange(message)
 			else:
 				logger.warning("Ignoring message from server")
@@ -139,7 +130,6 @@ class ClientProtocol(asyncio.Protocol):
 			print(mtype)
 			logger.warning("Invalid message type: {}".format(message['type']))
 
-		print("I got here for some reason but I shouldn't!")
 		#self.transport.close()
 		#self.loop.stop()
 
@@ -196,11 +186,12 @@ class ClientProtocol(asyncio.Protocol):
 		
 	def send_exchange(self,message: str) -> None:
 		"""
-		Called when rsa_keys and dh_keys need to be exchanged
+		Called when rsa_keys  need to be exchanged
 
 		:param data: The data that was received. This may not be a complete JSON message
 		:return:
 		"""
+		
 		self.rsa_private_key,self.rsa_public_key = security.get_rsa_asymn_keys()			
 			
 		rsa_public_key = security.serializePublicKey(self.rsa_public_key).decode("utf8")
@@ -237,9 +228,7 @@ class ClientProtocol(asyncio.Protocol):
 		dh_public_key = security.serializePublicKey(self.dh_public_key).decode("utf8")
 		
 		parameters = security.serializeParameters(self.parameters).decode("utf8")
-			
-		#enc_parameters = security.encrypt(self.encryptor,parameters)[0]
-			
+						
 		message = {'type': 'DH_EXCHANGE', 'client_dh_public_key':dh_public_key,'enc_parameters':parameters}
 		
 		self._send(message)
@@ -272,7 +261,10 @@ class ClientProtocol(asyncio.Protocol):
 			read_size = 16 * 60
 			while True:
 				data = f.read(16 * 60)
-				data = security.encrypt(encryptor,data= data)
+				#encrypt with encryptor with the derived shared key
+				data = security.encrypt(encryptor,data= data,hashing=self.cript.digest)
+				#encrypt with encryptor with symmetric key
+				data = security.encrypt(self.encryptor,data=data,hashing=self.cript.digest)
 				message['data'] = base64.b64encode(data).decode()
 				message['iv'] = base64.b64encode(iv).decode()
 				message_type = dict(list(message.items())[:1])

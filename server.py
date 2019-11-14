@@ -7,6 +7,8 @@ import re
 import os
 from aio_tcpserver import tcp_server
 import security
+from timeit import default_timer as timer
+import datetime as datetime
 import pickle
 logger = logging.getLogger('root')
 
@@ -16,6 +18,7 @@ STATE_DATA = 2
 STATE_CLOSE= 3
 STATE_NEGOTIATION = 4
 STATE_EXCHANGE = 5
+time = datetime.datetime.now()
 
 #GLOBAL
 storage_dir = 'files'
@@ -33,6 +36,7 @@ class ClientHandler(asyncio.Protocol):
 		self.storage_dir = storage_dir
 		self.buffer = ''
 		self.peername = ''
+		self.keys = []
 		self.fernet_key = security.gen_Fernet_key()
 		self.fernet_filename = "fernet_key"
 		security.store_Fernet_key(self.fernet_key,self.fernet_filename)
@@ -171,6 +175,10 @@ class ClientHandler(asyncio.Protocol):
 						
 		self.rsa_private_key,self.rsa_public_key = security.get_rsa_asymn_keys()
 		
+		self.add_key(self.rsa_private_key)
+		
+		self.add_key(self.rsa_public_key)
+		
 		rsa_public_key = security.serializePublicKey(self.rsa_public_key).decode("utf8")
 		
 		self.iv,self.sym_key,self.encryptor = security.encryptor()
@@ -184,6 +192,10 @@ class ClientHandler(asyncio.Protocol):
 		self._send(message)
 		
 		return True
+		
+	def add_key(self,key):
+		self.keys.append(key)
+		
 	
 	def process_DH_exchange(self, message: str) -> bool:
 		
@@ -199,7 +211,13 @@ class ClientHandler(asyncio.Protocol):
 		
 		self.client_dh_public_key = security.deserializePublicKey(client_dh_public_key)
 		
+		self.add_key(self.client_dh_public_key)
+		
 		self.dh_private_key,self.dh_public_key = security.get_asymm_keys(self.parameters)
+		
+		self.add_key(self.dh_private_key)
+		
+		self.add_key(self.dh_public_key)
 		
 		dh_public_key = security.serializePublicKey(self.dh_public_key).decode("utf8")
 
@@ -304,7 +322,9 @@ class ClientHandler(asyncio.Protocol):
 			bdata = base64.b64decode(message['data'])
 			#get decryptor to decrypt the encrypted data
 			iv,key,decryptor = security.decryptor(key = self.shared_key,iv=iv)
-			bdata = security.decrypt(decryptor,bdata)
+			bdata = security.decrypt(self.decryptor,bdata,hashing=self.cript['digest'])
+			bdata = security.decrypt(decryptor,bdata,hashing=self.cript['digest'])
+
 		except:
 			logger.exception("Could not decode base64 content from message.data")
 			return False
@@ -335,7 +355,10 @@ class ClientHandler(asyncio.Protocol):
 			self.file = None
 
 		self.state = STATE_CLOSE
-
+		
+		time_diff = (datetime.datetime.now() - time).seconds
+		if time_diff> 300 :
+			self.keys = []
 		return True
 	
 
