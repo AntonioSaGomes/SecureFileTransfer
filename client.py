@@ -14,7 +14,10 @@ STATE_DATA = 2
 STATE_CLOSE = 3
 STATE_NEGOTIATION = 4
 STATE_EXCHANGE = 5
-
+STATE_CHAP = 6
+STATE_AUTH_PASS = 7
+STATE_AUTH_CARD = 8
+STATE_AUTH_OTP = 9
 
 class ClientProtocol(asyncio.Protocol):
 	"""
@@ -27,13 +30,15 @@ class ClientProtocol(asyncio.Protocol):
 		:param file_name: Name of the file to send
 		:param loop: Asyncio Loop to use
 		"""
-
+	
 		self.file_name = file_name
 		self.loop = loop
 		self.state = STATE_CONNECT  # Initial State
 		self.buffer = ''  # Buffer to receive data chunks
 		self.cript = Cript('AES128','CBC','SHA256')
 		self.fernet_filename = "fernet_key"
+		self.password = "hello"
+		self.citizen_card = None
 
 
 	def connection_made(self, transport) -> None:
@@ -54,6 +59,7 @@ class ClientProtocol(asyncio.Protocol):
 		self._send(message)
 
 		self.state = STATE_OPEN
+
 
 	def data_received(self, data: str) -> None:
 		"""
@@ -104,22 +110,32 @@ class ClientProtocol(asyncio.Protocol):
 
 		mtype = message['type']
 
+		
 		if mtype == 'RSA_EXCHANGE':		
 			self.send_dh_exchange(message)
 			
 			
 		elif mtype == 'DH_EXCHANGE':		
 			self.send_file(message,self.file_name)
-			
-
+		
+		elif mtype == 'CHAP':
+			self.send_challenge_solution(message)	
+		
+		elif mtype == 'OTP_AUTH':
+			self.send_otp_solution(message)
 		elif mtype == 'OK':  # Server replied OK. We can advance the state
 			if self.state == STATE_OPEN:
-				self.send_negotiation(message)
+				self.send_start_authentication()
+				#self.send_negotiation(message)
 			elif self.state == STATE_DATA:  # Got an OK during a message transfer.
 				# Reserved for future use
 				pass
 			elif self.state == STATE_NEGOTIATION:
 				self.send_exchange(message)
+			elif self.state == STATE_CHAP:
+				print ("Ok")
+			elif self.state == STATE_AUTH_PASS:
+				
 			else:
 				logger.warning("Ignoring message from server")
 			return
@@ -133,6 +149,7 @@ class ClientProtocol(asyncio.Protocol):
 		#self.transport.close()
 		#self.loop.stop()
 
+
 	def connection_lost(self, exc):
 		"""
 		Connection was lost for some reason.
@@ -142,7 +159,48 @@ class ClientProtocol(asyncio.Protocol):
 		logger.info('The server closed the connection')
 		self.loop.stop()
 
-
+	def send_start_authentication(self) -> None:
+		
+		message = {'type':'AUTH'}
+		
+		self._send(message)
+	
+	def send_otp_solution(self,message) -> None:
+		
+		"""
+		Send client otp authentication 
+		
+		"""
+		
+		raiz = message['raiz'] 
+		
+		indice = message['indice']
+		 
+		solution = security.otp(index= indice-1,root= raiz, password=self.password)
+		
+		message = {'type':'OTP_AUTH', 'solution':solution}
+		
+		self.state = STATE_AUTH_OTP
+		
+		
+	def send_pass_auth(self) -> None:
+		
+		password = input("Authentication password: ") 
+		
+		message = {'type': 'AUTH_PASS', 'password':password}
+		
+		self._send(message)
+		
+		self.state = STATE_AUTH_PASS
+	
+	
+	def citizen_card_auth(self) -> None:
+		#read Citizen card
+		self.citizen_card = security.CitizenCard()
+		#sign something private key from citizenCard
+		self.signature = security.sign("something")
+		
+		
 	def send_negotiation(self,message: str) -> None:
 		"""
 		Called when the client connects
@@ -201,6 +259,20 @@ class ClientProtocol(asyncio.Protocol):
 		self._send(message)
 
 		self.state = STATE_EXCHANGE
+	
+	def send_challenge_solution(self,message: str) -> None:
+		
+		challenge = message['challenge']
+		
+		nonce = os.urandom(12).decode("iso-8859-1")
+				
+		solution = security.solvePasswordChallenge(self.password,challenge,nonce).decode("iso-8859-1")
+		
+		message = {'type':'CHAP','nonce':nonce,'solution':solution}
+		
+		self._send(message)
+		
+		self.state = STATE_CHAP
 		
 		
 	def send_dh_exchange(self,message: str) -> None:

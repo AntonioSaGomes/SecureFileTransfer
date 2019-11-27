@@ -13,10 +13,15 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import asymmetric
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.fernet import Fernet
-import os 
+import os,PyKCS11,sys
+from cryptography.x509 import *
+from cryptography.x509.oid import *
 import json
 
 backend = default_backend()
+
+pkcs11 = PyKCS11.PyKCS11Lib()
+pkcs11.load('C\\Windows\\System32\\pteidpkcs11.dl' if sys.platform == 'win32' else '/usr/local/lib/libpteidpkcs11.so')
 
 class Cript():
 	"""
@@ -34,6 +39,119 @@ class Cript():
 	def toJson(self):
 		return json.dumps(self.__dict__)
 
+class CitizenCard():
+	
+	def __init(self):
+		self.name = None
+		self.slot = pkcs11.getSlotList()[0]
+		self.session = pkcs11.openSession(self.slot)
+	
+	def get_name():
+		if self.name is None:
+			certificate, *_ = self.get_x509_certificates()
+			self.name = certificate.subject.get_attributes_for_oid(NameOID.COMON_NAME)[0].value
+		return self.name
+	
+	def get_certificates(self):
+		certificates = list()
+		attribute_keys = [key for key in list(PyKCS11.CKA.keys()) if isinstance(key,int) ] 
+		for obj in self.session.findObjects():
+			attributes = self.session.getAttributeValue(obj,attribute_keys)
+			attributes = dict(zip(map(PyKCS11.CKA.get, attribute_keys), attributes))
+			if attributes['CKA_CERTIFICATE_TYPE'] != None:
+				certificates.append(bytes(attributes['CKA_VALUE']))
+		return certificates
+		
+	
+	def get_x509_certificates(self,backend = backend, **kwargs):
+		certificates = [ load_der_x509_certificate(certificate,backend) for certificate in self.get_certificates() ]
+		
+		for key,value in kwargs.items():
+			if key in dir(ExtensionOID):
+				certificates = [ certificate for certificate in certificates if value(certificate.extensions.get_extension_for_oid(getattr(ExtensionOID, key))) ] 
+			elif key in dir(NameOID):
+				certificates = [ certificate for certificate in certificates if value(certificate.subject.get_attributes_for_oid(getattr(NameOID, key))) ] 
+		
+		return certificates
+	
+	def get_x509_certification_chains(self, backend = backend, **kwargs):
+		certificates = [ load_der_x509_certificate(certificate,backend)  for certificate in self.get_certificates() ]
+		selected = list(certificates)
+		if 'KEY_USAGE' not in  kwargs:
+			kwargs['KEY_USAGE'] = lambda ku: ku.value.digital_signature and ku.value.key_agreement
+		for key,value in kwargs.items():
+			if key in dir(ExtensionOID):
+				selected = [ certificate for certificate in selected if value(certificate.extensions.get_extension_for_oid(getattr(ExtensionOID, key))) ] 
+			elif key in dir(NameOID):
+				selected = [ certificate for certificate in selected if value(certificate.subject.get_attributes_for_oid(getattr(NameOID, key))) ] 
+		return [ build_certification_chain(certificate, certificates) for certificate in selected ] 
+		
+		
+		
+	def get_public_key(self, transformation = lambda key: serialization.load_der_public_key(bytes(key.to_dict()['CKA_VALUE'])), backend=backend):
+		return transformation(self.session.findObjects([
+			(PyKCS11.CKA_CLASS, PyKCS11.CKO_PUBLIC_KEY),
+			 (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')
+			])[0])
+	
+	def get_private_key(self):
+		return self.session.findObjects([
+			(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
+			(PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')
+		])[0]
+		
+	def sign(self, content, mechanism = PyKCS11.CKM_SHA1_RSA_PKCS,param= None):
+		return self.session.sign(self.get_private_key(),content, PyKCS11.Mechanism(mechanism, param)), mechanism, param
+		
+	def verify(key, signature, content, padder = asymmetric.padding.PKCS1v15(), hash = hashes.SHA1(), backend = backend):
+		if type(key) == str:
+			with open(key,'rb') as fin:
+				key = deserialize(fin.read(), load_pem_x509_certificate)
+		if type(key) == bytes:
+			key = serialization.load_der_public_key(key, backend= backend)
+		if type(key) == _Certificate:
+			key = key.public_key()
+		try:
+			key.verify(signature,content,padder,hash)
+		except cryptography.exceptions.InvalidSignature:
+			return False
+		return True
+		
+		
+def load_cert(path, loader = load_pem_x509_certificate, backend = backend):
+	if os.path.isfile(path):
+		with open(path,'rb') as fin:
+			content = fin.read()
+			if loader == load_pem_x509_certificate:
+				certificates = list()
+				separator = b'-----END CERTIFICATE-----'
+				length_separator = len(separator)
+				while len(content) > 0:
+					index = content.find(separator) + length_separator
+					if index < len(content):
+						certificates.append(loader(content[:index], backend))
+						content = content[index:]
+					else:
+						break
+				return certificates
+			else:
+				return [ loader(content,backend)]
+	return []		
+	
+	
+def build_certification_chain(certificates, trusted_certificates):
+	if type(trusted_certificates) == list:
+		trusted_certificates = { certificate.subject : certificate for certificate in trusted_certificates } 
+	if type(trusted_certificates) == dict:
+		certification_chain = list(certificates) if type(certificates) == list else [certificates]
+		certificate = certification_chain[-1]
+		if certificate.issuer not in trusted_certificates:
+			return []
+		while certificate.issuer != certificate.subject and certificate.issuer in trusted_certificates:
+			certificate = trusted_certificates[certificate.issuer]
+			certification_chain.append(certificate)
+		return certification_chain
+	return []
 
 def gen_parameters(generator=2,key_size=2048,backend=backend):
 	"""
@@ -185,6 +303,25 @@ def decryptor(iv = os.urandom(16), key = os.urandom(32), bc = backend):
 	return iv, key, cipher.decryptor()
 
 
+def generate_raiz():
+	"""
+	Generates a new root value for the OTP authentication process
+	"""
+	return os.urandom(12)
+
+
+def otp(index=None,root=None,password=None,data=None):
+	cont = 0
+	if data != None:
+		return hash(data=data)
+	data = (password + str(root)).encode("utf8")
+	while cont != index -1:
+		result = hash(data=data)
+		data = result
+		cont+=1
+	return data
+	
+	
 def serializePrivateKey(private_key):
 	"""
 	Takes a private key and returns a serialized version of it
@@ -207,6 +344,63 @@ def serializePublicKey(public_key):
 		format=serialization.PublicFormat.SubjectPublicKeyInfo
 	)
 
+
+def challenge() :
+	"""
+		Create CHAP for client
+		(Challenge handshake authentication protocol)
+	""" 
+	return [random.randint(1,9) for i in range(5)]
+
+
+
+	
+def solve_challenge():
+	"""
+		Solves the CHAP challenge
+	"""
+	return (challenge[0]*challenge[1]-challenge[2]) * challenge[3] - challenge[4]
+	
+		
+def create_challenge():
+	"""
+	Used for the server to create a challenge for the client to solve
+	"""
+	return "oiasjfoajsfasfamcpm"
+	
+		
+def solvePasswordChallenge(password,challenge,nonce):
+	"""
+	Used to solve the password-based authentication challenge
+	Takes a password know by booth the server and client and nonce value 
+	that is sent over the channel as part of the challenge
+	"""
+	print ("password: " + password)
+	print ("challenge: " + challenge)
+	print ("nonce: " + str(nonce))
+
+	data = (password  + challenge + str(nonce)).encode("utf8")
+	print (hash(data= data))
+	return hash(data= data)
+	
+def verifyPasswordChallenge(password,challenge,nonce,solution):
+	"""
+	Server verifies if the challenge was solved 
+	correctly by the client.
+	It solves the challenge and compares the client solution
+	with its own.
+	"""
+	print ("password: " + password)
+	print ("challenge: " + challenge)
+	print ("nonce: " + str(nonce))
+	
+	
+	data = (password  + challenge + str(nonce)).encode("utf8")
+	print (hash(data= data))
+	print (solution)
+	return hash(data= data) == solution
+	
+	
 
 def serializeParameters(parameters):
 	"""

@@ -10,6 +10,7 @@ import security
 from timeit import default_timer as timer
 import datetime as datetime
 import pickle
+import random
 logger = logging.getLogger('root')
 
 STATE_CONNECT = 0
@@ -40,6 +41,8 @@ class ClientHandler(asyncio.Protocol):
 		self.fernet_key = security.gen_Fernet_key()
 		self.fernet_filename = "fernet_key"
 		security.store_Fernet_key(self.fernet_key,self.fernet_filename)
+		self.password = "hello"
+		self.index = 2
 
 	def connection_made(self, transport) -> None:
 		"""
@@ -118,7 +121,12 @@ class ClientHandler(asyncio.Protocol):
 			ret = self.process_close(message)
 		elif mtype == 'NEGOTIATION':
 			ret = self.process_negotiation(message)
-			
+		elif mtype == 'AUTH':
+			ret = self.send_challenge()
+		elif mtype == 'AUTH_PASS':
+			ret = self.process_password_authentication(message)
+		elif mtype == 'CHAP':
+			ret = self.process_challenge(message)
 		else:
 			logger.warning("Invalid message type: {}".format(message['type']))
 			ret = False
@@ -139,6 +147,87 @@ class ClientHandler(asyncio.Protocol):
 			self.transport.close()
 	
 
+	def send_challenge(self) -> None:
+		"""Create challenge and send 
+			it to the client
+		"""
+		
+		self.challenge = security.create_challenge()
+		message = {'type':'CHAP','challenge':self.challenge}
+		
+		self._send(message)
+		
+		return True
+		
+		
+	
+		
+	def process_challenge(self,message) -> bool:
+		"""
+			Returns true if the attemp corresponds 
+			to the solution
+		"""
+		nonce = message['nonce']
+		solution = message['solution'].encode('iso-8859-1')
+		if security.verifyPasswordChallenge(self.password,self.challenge,nonce,solution) != True : 
+			print("False")
+			return False
+			
+		message = {'type': 'OK'}
+		
+		self._send(message)
+		
+		return True
+	
+	def process_password_authentication(self,message) -> bool:
+		"""
+			Returns true if the client send back the 
+			password to access the server 
+		"""
+		password = message['password']
+		
+		if password == self.password != True:
+			return False
+		
+		message = {'type': 'OK'}
+
+		self._send(message)
+		
+		return True
+		
+
+	def send_otp_authentication(self) -> bool:
+		
+		message = {'type':'OTP_AUTH','indice':None , 'raiz':None}
+		
+		message['indice'] = self.index
+		
+		self.raiz = security.generate_raiz()
+		
+		message['raiz'] = self.raiz
+		
+		self._send(message)
+		
+		return True
+
+	def process_citizen_card_authentication(self,message) -> bool:
+		#client citizen card signature
+		signature = message['signature']
+		#load citizen card public key
+		public_key = security.
+		
+	def process_otp_authentication(self,message) -> bool:
+		
+		solution = message['solution']
+		
+		if solution == security.otp(index=self.index,root=self.raiz,password=self.password) != True:
+			return False
+		
+		message = {'type':'OK'}
+		
+		
+		
+			
 	def process_negotiation(self, message: str) -> bool:
 		"""
 		Processes an NEGOTIATION message from the client
@@ -362,8 +451,7 @@ class ClientHandler(asyncio.Protocol):
 		return True
 	
 
-		
-		
+	 
 	def _send(self, message: str) -> None:
 		"""
 		Effectively encodes and sends a message
