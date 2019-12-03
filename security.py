@@ -359,7 +359,7 @@ def generate_raiz():
 	return os.urandom(12)
 
 
-def otp(index=None,root=None,password=None,data=None):
+def otp(index,root,password,data=None):
 	cont = 0
 	if data != None:
 		return hash(data=data)
@@ -420,7 +420,7 @@ def create_challenge():
 	"""
 	Used for the server to create a challenge for the client to solve
 	"""
-	return "oiasjfoajsfasfamcpm"
+	return os.urandom(12)
 	
 		
 def solvePasswordChallenge(password,challenge,nonce):
@@ -430,11 +430,10 @@ def solvePasswordChallenge(password,challenge,nonce):
 	that is sent over the channel as part of the challenge
 	"""
 	print ("password: " + password)
-	print ("challenge: " + challenge)
+	print ("challenge: " + str(challenge))
 	print ("nonce: " + str(nonce))
-
-	data = (password  + challenge + str(nonce)).encode("utf8")
-	print (hash(data= data))
+	
+	data = (password  +str(challenge) + str(nonce)).encode("utf8")
 	return hash(data= data)
 	
 def verifyPasswordChallenge(password,challenge,nonce,solution):
@@ -445,13 +444,12 @@ def verifyPasswordChallenge(password,challenge,nonce,solution):
 	with its own.
 	"""
 	print ("password: " + password)
-	print ("challenge: " + challenge)
+	print ("challenge: " + str(challenge))
 	print ("nonce: " + str(nonce))
 	
 	
-	data = (password  + challenge + str(nonce)).encode("utf8")
-	print (hash(data= data))
-	print (solution)
+	data = (password  + str(challenge) + str(nonce)).encode("utf8")
+
 	return hash(data= data) == solution
 	
 	

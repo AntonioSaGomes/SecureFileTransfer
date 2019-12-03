@@ -242,6 +242,10 @@ def valid_attributes(certificate, kwargs):
 
 cit = security.CitizenCard()
 
+priv_key = cit.get_private_key()
+
+print(dir(priv_key))
+"""
 fingerprints = [b'\xc2O\xc8~\x9dc\x1c\xde6b\xbbYD?\x92\xd2\xf3\xdev\xbe\xb8\xb5h\x8e"jfY\xf0\x9fJ%']	
 
 server_cert = security.load_cert('server_cert.pem')[0]
@@ -269,7 +273,7 @@ print ("valid certificate chain? : " + str(valid))
 
 client_cert = cit.get_x509_certificates()[0]
 
-
+"""
 #cert = security.loadPrivateKey('server_privkey')
 
 

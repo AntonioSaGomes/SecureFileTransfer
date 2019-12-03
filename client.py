@@ -132,7 +132,6 @@ class ClientProtocol(asyncio.Protocol):
 			self.send_challenge_solution(message)	
 		
 		elif mtype == 'OTP_AUTH':
-			print ("got there")
 			self.send_otp_solution(message)
 		
 		elif mtype == 'SERVER_ACCESS_CONTROL':
@@ -146,6 +145,10 @@ class ClientProtocol(asyncio.Protocol):
 		
 		elif mtype == 'DATA':
 			self.send_file(self.file_name)
+		
+		elif mtype == 'CITIZEN_CARD_AUTH':
+			self.send_citizen_card_auth()
+			
 		elif mtype == 'OK':  # Server replied OK. We can advance the state
 			if self.state == STATE_OPEN:
 				self.send_client_acess_control()
@@ -163,7 +166,7 @@ class ClientProtocol(asyncio.Protocol):
 			elif self.state == STATE_CLIENT_ACCESS_CONTROL:
 				self.start_server_access_control()
 			elif self.state == STATE_AUTH_CARD:
-				self._send({'type': 'SERVER_AUTH'})				
+				self._send({"type":"CHAP"})
 			elif self.state == STATE_AUTH_OTP:
 				self.send_negotiation()
 			else:
@@ -227,7 +230,6 @@ class ClientProtocol(asyncio.Protocol):
 	
 		message = {'type':'OK'}
 		
-		print("im here")
 		self._send(message)
 		
 		return True
@@ -247,26 +249,6 @@ class ClientProtocol(asyncio.Protocol):
 		self._send(message)
 	
 	
-	def load_client_certs(self) -> bool:
-		"""
-		Load citizen card certs
-		Build the certification chain 
-		and validate
-		"""
-		
-		chain = self.citizen_card.get_x509_certification_chains()[0]
-		
-		if security.valid_certification_chain(chain, [{
-					'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
-				}] + [{
-					'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
-				}] * 3, check_revogation = [ True ] * 3 + [ False ]) != False:
-			
-			chain = None
-			return False
-		
-		return True
-		
 					
 	def send_otp_solution(self,message: str) -> None:
 		
@@ -274,7 +256,7 @@ class ClientProtocol(asyncio.Protocol):
 		Send client otp authentication 
 		
 		"""
-		
+
 		raiz = message['raiz'] 
 		
 		indice = message['indice']
@@ -325,23 +307,6 @@ class ClientProtocol(asyncio.Protocol):
 		
 		self.state = STATE_AUTH_CARD
 	
-	def send_x509_server_authentication(self) -> None:
-				
-		#content to signed
-		content = os.urandom(12)
-		
-		#sign content private key 
-		server_cert = security.load_cert('server_cert.pem')[0]
-		
-		server_pub_key = server_cert.public_key()
-		
-		signature = server_pub_key.encrypt(content)
-		
-		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1')}
-		
-		self._send(message)
-		
-		self.state = STATE_SERVER_CERT_AUTH
 	
 	def process_x509_server_authentication(self,message: str) -> bool:
 		#server cert priv_key signature
@@ -352,6 +317,9 @@ class ClientProtocol(asyncio.Protocol):
 		certificate = message['server_cert'].encode('iso-8859-1')
 		
 		certificate = security.deserialize(certificate, security.load_pem_x509_certificate) 
+		
+		self.server_pub_key = certificate.public_key()
+
 		#load trusted_certificates
 		trusted_certificates =  security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
 		#build certification chain
@@ -435,13 +403,15 @@ class ClientProtocol(asyncio.Protocol):
 	
 	def send_challenge_solution(self,message: str) -> None:
 		
-		challenge = message['challenge']
+		challenge = message['challenge'].encode('iso-8859-1')
 		
 		nonce = os.urandom(12).decode("iso-8859-1")
 				
-		solution = security.solvePasswordChallenge(self.password,challenge,nonce).decode("iso-8859-1")
+		solution = security.solvePasswordChallenge(self.password,challenge,nonce)
 		
-		message = {'type':'CHAP','nonce':nonce,'solution':solution}
+		solution = security.encrypt(self.server_pub_key,solution)[0]
+		
+		message = {'type':'CHAP','nonce':nonce,'solution':solution.decode("iso-8859-1")}
 		
 		self._send(message)
 		

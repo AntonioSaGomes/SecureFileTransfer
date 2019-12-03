@@ -11,6 +11,7 @@ from timeit import default_timer as timer
 import datetime as datetime
 import pickle
 import random
+import random
 logger = logging.getLogger('root')
 
 STATE_CONNECT = 0
@@ -26,6 +27,7 @@ STATE_CLIENT_ACCESS_CONTROL = 9
 STATE_CLIENT_RSA_AUTH = 10
 STATE_SERVER_RSA_AUTH = 11
 STATE_SERVER_CERT_AUTH = 12
+STATE_CLIENT_CARD_AUTH = 13
 
 time = datetime.datetime.now()
 
@@ -50,7 +52,7 @@ class ClientHandler(asyncio.Protocol):
 		self.fernet_filename = "fernet_key"
 		security.store_Fernet_key(self.fernet_key,self.fernet_filename)
 		self.password = "hello"
-		self.index = 2
+		self.index = random.randint(3,9)
 		self.allowed_users = ['BI15231430']
 		self.cert_fingerprints = [b'\xc2O\xc8~\x9dc\x1c\xde6b\xbbYD?\x92\xd2\xf3\xdev\xbe\xb8\xb5h\x8e"jfY\xf0\x9fJ%']
 
@@ -138,7 +140,10 @@ class ClientHandler(asyncio.Protocol):
 		elif mtype == 'SERVER_ACCESS_CONTROL':
 			ret = self.send_server_access_control()
 		elif mtype == 'CHAP':
-			ret = self.process_challenge(message)
+			if self.state == STATE_CLIENT_CARD_AUTH:
+				ret = self.send_challenge()
+			elif self.state == STATE_CHAP:
+				ret = self.process_challenge(message)
 		elif mtype == 'SERVER_AUTH':
 			ret = self.send_x509_server_authentication()
 		elif mtype == 'CITIZEN_CARD_AUTH':
@@ -154,12 +159,13 @@ class ClientHandler(asyncio.Protocol):
 				ret = False
 		elif mtype == 'OK':
 			if self.state == STATE_SERVER_ACCESS_CONTROL:
-				self.send_challenge()
+				#self.send_challenge()
+				ret = self.send_x509_server_authentication()
 			elif self.state == STATE_SERVER_RSA_AUTH:
 				pass
 			elif self.state == STATE_SERVER_CERT_AUTH:
-				self.state= STATE_DATA
-				self._send({'type':'DATA'})
+				#self.state= STATE_DATA
+				self._send({'type':'CITIZEN_CARD_AUTH'})
 				
 		else:
 			logger.warning("Invalid message type: {}".format(message['type']))
@@ -200,9 +206,7 @@ class ClientHandler(asyncio.Protocol):
 		
 		return True
 		
-			
-		
-	
+
 	def send_server_access_control(self) -> bool:
 		
 		server_cert = security.load_cert('server_cert.pem')[0]
@@ -217,14 +221,80 @@ class ClientHandler(asyncio.Protocol):
 		
 		return True
 
-
+	def send_x509_server_authentication(self) -> bool:
+		
+		self.private_key = security.loadPrivateKey('server_privkey')
+		#content to signed
+		content = os.urandom(12)
+		#sign content private key 
+		signature = security.sign(self.private_key,content)
+		
+		#send server certificate 
+		server_cert = security.load_cert('server_cert.pem')[0]
+		
+		server_cert = security.serialize(server_cert).decode('iso-8859-1')
+		
+		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
+		
+		self._send(message)
+		
+		self.state = STATE_SERVER_CERT_AUTH
+		
+		return True
+	
+	
+	def process_citizen_card_authentication(self,message) -> bool:
+		self.state = STATE_CLIENT_CARD_AUTH
+		#client citizen card signature
+		signature = bytes(message['signature'], encoding='iso-8859-1')
+		#content that was signed by citizen card
+		content = message['content'].encode('iso-8859-1')
+		#load trusted_certificates
+		trusted_certificates =   security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
+		
+		#load client certificates
+		certificates = message['certificates']	
+			
+		certificates = [ cert.encode('iso-8859-1') for cert in certificates]
+		
+		
+		
+		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]
+		
+		#pub key used for further encryption
+		self.client_certificate_pub_key = certificates[0].public_key()
+		#build certification chain
+		chain = security.build_certification_chain(certificates,trusted_certificates)
+		#verify certification chain 
+		if security.valid_certification_chain(chain,[{
+			'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
+		}] + [{
+			'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
+		}] * 3, check_revogation = [ True ] * 3 + [ False ]) != True:
+			return False
+	
+	
+		#verify signature 
+		if security.verify(certificates[0],signature,content) != True:
+			return False
+		
+		message = {'type': 'OK'}
+				
+		self._send(message)
+		
+		return True
+			
+	
+	
 	def send_challenge(self) -> bool:
 		"""Create challenge and send 
 			it to the client
 		"""
 		
 		self.challenge = security.create_challenge()
-		message = {'type':'CHAP','challenge':self.challenge}
+		
+		
+		message = {'type':'CHAP','challenge':self.challenge.decode('iso-8859-1')}
 		
 		self._send(message)
 		
@@ -242,7 +312,11 @@ class ClientHandler(asyncio.Protocol):
 			to the solution
 		"""
 		nonce = message['nonce']
+		
 		solution = message['solution'].encode('iso-8859-1')
+		
+		solution = security.decrypt(self.private_key,solution)[0]
+		
 		if security.verifyPasswordChallenge(self.password,self.challenge,nonce,solution) != True : 
 			print("False")
 			return False
@@ -288,62 +362,6 @@ class ClientHandler(asyncio.Protocol):
 
 		return True
 
-	def process_citizen_card_authentication(self,message) -> bool:
-		#client citizen card signature
-		signature = bytes(message['signature'], encoding='iso-8859-1')
-		#content that was signed by citizen card
-		content = message['content'].encode('iso-8859-1')
-
-		#load trusted_certificates
-		trusted_certificates =   security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
-		#load client certificates
-		certificates = message['certificates']
-		
-		certificates = [ cert.encode('iso-8859-1') for cert in certificates]
-		
-		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]
-		#build certification chain
-		chain = security.build_certification_chain(certificates,trusted_certificates)
-		#verify certification chain 
-		if security.valid_certification_chain(chain,[{
-			'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
-		}] + [{
-			'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
-		}] * 3, check_revogation = [ True ] * 3 + [ False ]) != True:
-			return False
-	
-	
-		#verify signature 
-		if security.verify(certificates[0],signature,content) != True:
-			return False
-		
-		message = {'type': 'OK'}
-				
-		self._send(message)
-		
-		return True
-			
-	
-	def send_x509_server_authentication(self) -> bool:
-		
-		private_key = security.loadPrivateKey('server_privkey')
-		#content to signed
-		content = os.urandom(12)
-		#sign content private key 
-		signature = security.sign(private_key,content)
-		
-		#send server certificate 
-		server_cert = security.load_cert('server_cert.pem')[0]
-		
-		server_cert = security.serialize(server_cert).decode('iso-8859-1')
-		
-		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
-		
-		self._send(message)
-		
-		self.state = STATE_SERVER_CERT_AUTH
-		
-		return True
 		
 	
 	def process_otp_authentication(self,message) -> bool:
@@ -355,7 +373,7 @@ class ClientHandler(asyncio.Protocol):
 		
 		message = {'type':'OK'}
 		
-		self.index = self.index+1
+		self.index = random.randint(3,9)
 		
 		self._send(message)
 		
