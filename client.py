@@ -6,6 +6,7 @@ import coloredlogs, logging
 import os
 import security 
 from security import Cript
+import pickle
 logger = logging.getLogger('root')
 
 STATE_CONNECT = 0
@@ -18,6 +19,10 @@ STATE_CHAP = 6
 STATE_AUTH_PASS = 7
 STATE_AUTH_CARD = 8
 STATE_AUTH_OTP = 9
+STATE_CLIENT_ACCESS_CONTROL = 10
+STATE_SERVER_ACCESS_CONTROL = 11
+STATE_CLIENT_RSA_AUTH = 12
+STATE_SERVER_RSA_AUTH = 13
 
 class ClientProtocol(asyncio.Protocol):
 	"""
@@ -38,7 +43,8 @@ class ClientProtocol(asyncio.Protocol):
 		self.cript = Cript('AES128','CBC','SHA256')
 		self.fernet_filename = "fernet_key"
 		self.password = "hello"
-		self.citizen_card = None
+		self.citizen_card = security.CitizenCard()
+		self.cert_fingerprints = [ b"K\xbb\xe2\xb0kl\xf8[\x1c\xbdjM\x1f\xcaVh\xc4\x8a\xeb\x02u+\x99}\x82!\xc3\xe3\x8f\xb5\xa4'"]
 
 
 	def connection_made(self, transport) -> None:
@@ -61,6 +67,8 @@ class ClientProtocol(asyncio.Protocol):
 		self.state = STATE_OPEN
 
 
+		
+
 	def data_received(self, data: str) -> None:
 		"""
 		Called when data is received from the server.
@@ -70,9 +78,10 @@ class ClientProtocol(asyncio.Protocol):
 		:return:
 		"""
 		
+		data = security.fernet_decript(self.fernet_key,data)
+
 		logger.debug('Received: {}'.format(data))
 	
-		data = security.fernet_decript(self.fernet_key,data)
 		
 		try:
 			self.buffer += data.decode()
@@ -115,27 +124,48 @@ class ClientProtocol(asyncio.Protocol):
 			self.send_dh_exchange(message)
 			
 			
-		elif mtype == 'DH_EXCHANGE':		
-			self.send_file(message,self.file_name)
+		elif mtype == 'DH_EXCHANGE':	
+			self.send_assymetric_key_authentication(message)		
+			#self.send_citizen_card_auth(message)
 		
 		elif mtype == 'CHAP':
 			self.send_challenge_solution(message)	
 		
 		elif mtype == 'OTP_AUTH':
+			print ("got there")
 			self.send_otp_solution(message)
+		
+		elif mtype == 'SERVER_ACCESS_CONTROL':
+			ret = self.process_server_access_control(message)
+		
+		elif mtype == 'SERVER_CERT_AUTH':
+			ret = self.process_x509_server_authentication(message)
+			
+		elif mtype == 'SERVER_RSA_AUTH':
+			self.process_server_asym_key_authentication(message)
+		
+		elif mtype == 'DATA':
+			self.send_file(self.file_name)
 		elif mtype == 'OK':  # Server replied OK. We can advance the state
 			if self.state == STATE_OPEN:
-				self.send_start_authentication()
-				#self.send_negotiation(message)
+				self.send_client_acess_control()
+				#self.send_negotiation()
 			elif self.state == STATE_DATA:  # Got an OK during a message transfer.
 				# Reserved for future use
 				pass
 			elif self.state == STATE_NEGOTIATION:
 				self.send_exchange(message)
 			elif self.state == STATE_CHAP:
-				print ("Ok")
+				#go to otp_auth
+				self.send_start_otp_auth()	
 			elif self.state == STATE_AUTH_PASS:
-				
+				pass
+			elif self.state == STATE_CLIENT_ACCESS_CONTROL:
+				self.start_server_access_control()
+			elif self.state == STATE_AUTH_CARD:
+				self._send({'type': 'SERVER_AUTH'})				
+			elif self.state == STATE_AUTH_OTP:
+				self.send_negotiation()
 			else:
 				logger.warning("Ignoring message from server")
 			return
@@ -159,13 +189,86 @@ class ClientProtocol(asyncio.Protocol):
 		logger.info('The server closed the connection')
 		self.loop.stop()
 
+
+	def start_server_access_control(self) -> None:
+		
+		message = {"type": "SERVER_ACCESS_CONTROL"}
+		
+		self._send(message)
+
+	def send_client_acess_control(self):
+		
+	
+		serial_number = self.citizen_card.get_id_number()
+		
+		nonce = os.urandom(12).decode('iso-8859-1')
+		
+		challenge = security.challenge_serial_number(serial_number,nonce)
+		
+		message = {"type": "CLIENT_ACCESS_CONTROL", 'challenge':challenge.decode('iso-8859-1'),'nonce':nonce}
+		
+		self._send(message)
+		
+		self.state = STATE_CLIENT_ACCESS_CONTROL
+	
+	
+	def process_server_access_control(self,message) -> bool:
+		
+
+		self.state = STATE_SERVER_ACCESS_CONTROL
+		
+		digest = message['digest']
+		
+		print(security.verify_hashes(digest,self.cert_fingerprints))	
+		if security.verify_hashes(digest,self.cert_fingerprints) != True:
+
+			return False
+		
+	
+		message = {'type':'OK'}
+		
+		print("im here")
+		self._send(message)
+		
+		return True
+		
+		
+		
 	def send_start_authentication(self) -> None:
 		
 		message = {'type':'AUTH'}
 		
 		self._send(message)
 	
-	def send_otp_solution(self,message) -> None:
+	
+	def send_start_otp_auth(self) -> None:
+		
+		message = {'type':'OTP_AUTH'}
+		self._send(message)
+	
+	
+	def load_client_certs(self) -> bool:
+		"""
+		Load citizen card certs
+		Build the certification chain 
+		and validate
+		"""
+		
+		chain = self.citizen_card.get_x509_certification_chains()[0]
+		
+		if security.valid_certification_chain(chain, [{
+					'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
+				}] + [{
+					'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
+				}] * 3, check_revogation = [ True ] * 3 + [ False ]) != False:
+			
+			chain = None
+			return False
+		
+		return True
+		
+					
+	def send_otp_solution(self,message: str) -> None:
 		
 		"""
 		Send client otp authentication 
@@ -176,12 +279,14 @@ class ClientProtocol(asyncio.Protocol):
 		
 		indice = message['indice']
 		 
-		solution = security.otp(index= indice-1,root= raiz, password=self.password)
+		solution = security.otp(index= indice-1,root= raiz, password=self.password).decode('iso-8859-1')
 		
 		message = {'type':'OTP_AUTH', 'solution':solution}
 		
-		self.state = STATE_AUTH_OTP
+		self._send(message)
 		
+		self.state = STATE_AUTH_OTP
+				
 		
 	def send_pass_auth(self) -> None:
 		
@@ -194,14 +299,82 @@ class ClientProtocol(asyncio.Protocol):
 		self.state = STATE_AUTH_PASS
 	
 	
-	def citizen_card_auth(self) -> None:
+	def send_citizen_card_auth(self) -> None:
+		
 		#read Citizen card
 		self.citizen_card = security.CitizenCard()
-		#sign something private key from citizenCard
-		self.signature = security.sign("something")
 		
+		security.store_public_key(self.citizen_card.get_public_key(),"client")
 		
-	def send_negotiation(self,message: str) -> None:
+		#content to be signed
+		content = os.urandom(12)
+		
+		#sign content private key from citizenCard
+		self.signature = self.citizen_card.sign(content)[0]
+		
+		signature = bytes(self.signature)
+		
+		#need to send certificate chain
+		chain = self.citizen_card.get_x509_certification_chains()[0]
+		
+		certificates = [security.serialize(certificate).decode('iso-8859-1') for certificate in chain]
+		
+		message = {'type': 'CITIZEN_CARD_AUTH', 'signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'), 'certificates':certificates}
+		
+		self._send(message)
+		
+		self.state = STATE_AUTH_CARD
+	
+	def send_x509_server_authentication(self) -> None:
+				
+		#content to signed
+		content = os.urandom(12)
+		
+		#sign content private key 
+		server_cert = security.load_cert('server_cert.pem')[0]
+		
+		server_pub_key = server_cert.public_key()
+		
+		signature = server_pub_key.encrypt(content)
+		
+		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1')}
+		
+		self._send(message)
+		
+		self.state = STATE_SERVER_CERT_AUTH
+	
+	def process_x509_server_authentication(self,message: str) -> bool:
+		#server cert priv_key signature
+		signature = bytes(message['signature'], encoding='iso-8859-1')
+		#content that was signed by server cert priv_key
+		content = message['content'].encode('iso-8859-1')
+		#server certificate
+		certificate = message['server_cert'].encode('iso-8859-1')
+		
+		certificate = security.deserialize(certificate, security.load_pem_x509_certificate) 
+		#load trusted_certificates
+		trusted_certificates =  security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
+		#build certification chain
+		chain = security.build_certification_chain(certificate,trusted_certificates)
+		#verify certification chain 
+		if security.valid_certification_chain(chain,[{
+			'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
+		}] + [{
+			'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
+		}] * 3, check_revogation = [ True ] * 3 + [ False ]) != True:
+			return False
+			
+		#verify signature 
+		if security.verify(certificate,signature,content) != True:
+			return False
+		
+		message = {'type': 'OK'}
+				
+		self._send(message)
+		
+		return True
+		
+	def send_negotiation(self) -> None:
 		"""
 		Called when the client connects
 		
@@ -304,18 +477,65 @@ class ClientProtocol(asyncio.Protocol):
 		message = {'type': 'DH_EXCHANGE', 'client_dh_public_key':dh_public_key,'enc_parameters':parameters}
 		
 		self._send(message)
+
+
+	def send_assymetric_key_authentication(self,message: str) -> None:
+		
+		"""
+		Client sends a request to the client to authenticate
+		Using the clients rsa public key it encrypts the value
+		Finnaly it hashes the original nonce value for authentication
+		""" 
+		server_dh_public_key = message['server_dh_public_key']
+		
+		self.server_dh_public_key = security.deserializePublicKey(server_dh_public_key)
+		
+		nonce = os.urandom(12)
+		
+		enc_nonce = security.encrypt(self.server_rsa_public_key,nonce)[0]
+		
+		digest = security.hash(nonce)
+		
+		message = {'type': 'CLIENT_RSA_AUTH','nonce':enc_nonce.decode('iso-8859-1'),'digest':digest.decode('iso-8859-1')}
+		
+		self._send(message)
+		
+		self.state = STATE_CLIENT_RSA_AUTH
+		
+	
+	def process_server_asym_key_authentication(self,message: str) -> bool:
+		
+		"""
+		Client receives an auth request
+		Using its private asym key decrypts the nonce 
+		Generates the hash with decrypted nonce and compares with digest sent
+		"""
+		
+		server_digest = message['digest'].encode('iso-8859-1')
+		
+		enc_nonce = message['nonce'].encode('iso-8859-1')
+		
+		nonce = security.decrypt(self.rsa_private_key,enc_nonce)[0]
+		
+		digest = security.hash(nonce)
+		
+		if server_digest != digest : 
+			return False
+		
+		self.send_citizen_card_auth()
+		
+		return True
 		
 		
-	def send_file(self, message: str,file_name: str) -> None:
+		
+				
+	def send_file(self,file_name: str) -> None:
 		"""
 		Sends a file to the server.
 		The file is read in chunks, encoded to Base64 and sent as part of a DATA JSON message
 		:param file_name: File to send
 		:return:  None
 		"""
-		server_dh_public_key = message['server_dh_public_key']
-		
-		self.server_dh_public_key = security.deserializePublicKey(server_dh_public_key)
 		
 		#shared key used for encryption of the file content
 		

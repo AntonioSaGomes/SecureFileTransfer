@@ -19,6 +19,14 @@ STATE_DATA = 2
 STATE_CLOSE= 3
 STATE_NEGOTIATION = 4
 STATE_EXCHANGE = 5
+STATE_CHAP = 6 
+STATE_AUTH_OTP = 7
+STATE_SERVER_ACCESS_CONTROL = 8
+STATE_CLIENT_ACCESS_CONTROL = 9
+STATE_CLIENT_RSA_AUTH = 10
+STATE_SERVER_RSA_AUTH = 11
+STATE_SERVER_CERT_AUTH = 12
+
 time = datetime.datetime.now()
 
 #GLOBAL
@@ -43,6 +51,8 @@ class ClientHandler(asyncio.Protocol):
 		security.store_Fernet_key(self.fernet_key,self.fernet_filename)
 		self.password = "hello"
 		self.index = 2
+		self.allowed_users = ['BI15231430']
+		self.cert_fingerprints = [b'\xc2O\xc8~\x9dc\x1c\xde6b\xbbYD?\x92\xd2\xf3\xdev\xbe\xb8\xb5h\x8e"jfY\xf0\x9fJ%']
 
 	def connection_made(self, transport) -> None:
 		"""
@@ -66,9 +76,10 @@ class ClientHandler(asyncio.Protocol):
         :return:
         """
         
+		data = security.fernet_decript(self.fernet_key,data)
+
 		logger.debug('Received: {}'.format(data))
 
-		data = security.fernet_decript(self.fernet_key,data)
 
 		try:
 			self.buffer += data.decode()
@@ -107,7 +118,6 @@ class ClientHandler(asyncio.Protocol):
 			return
 
 		mtype = message.get('type', "").upper()
-		print(mtype)
 
 		if mtype == 'OPEN':
 			ret = self.process_open(message)
@@ -121,17 +131,40 @@ class ClientHandler(asyncio.Protocol):
 			ret = self.process_close(message)
 		elif mtype == 'NEGOTIATION':
 			ret = self.process_negotiation(message)
-		elif mtype == 'AUTH':
-			ret = self.send_challenge()
 		elif mtype == 'AUTH_PASS':
 			ret = self.process_password_authentication(message)
+		elif mtype == 'CLIENT_ACCESS_CONTROL':
+			ret = self.process_client_access_control(message)
+		elif mtype == 'SERVER_ACCESS_CONTROL':
+			ret = self.send_server_access_control()
 		elif mtype == 'CHAP':
 			ret = self.process_challenge(message)
+		elif mtype == 'SERVER_AUTH':
+			ret = self.send_x509_server_authentication()
+		elif mtype == 'CITIZEN_CARD_AUTH':
+			ret = self.process_citizen_card_authentication(message)
+		elif mtype == 'CLIENT_RSA_AUTH':
+			ret = self.process_client_asym_key_authentication(message)
+		elif mtype == 'OTP_AUTH':
+			if self.state == STATE_CHAP:
+				ret = self.send_otp_authentication()
+			elif self.state == STATE_AUTH_OTP:
+				ret = self.process_otp_authentication(message)
+			else:
+				ret = False
+		elif mtype == 'OK':
+			if self.state == STATE_SERVER_ACCESS_CONTROL:
+				self.send_challenge()
+			elif self.state == STATE_SERVER_RSA_AUTH:
+				pass
+			elif self.state == STATE_SERVER_CERT_AUTH:
+				self.state= STATE_DATA
+				self._send({'type':'DATA'})
+				
 		else:
 			logger.warning("Invalid message type: {}".format(message['type']))
 			ret = False
 
-		print (mtype,ret)
 		if not ret:
 			try:
 				self._send({'type': 'ERROR', 'message': 'See server'})
@@ -145,9 +178,47 @@ class ClientHandler(asyncio.Protocol):
 
 			self.state = STATE_CLOSE
 			self.transport.close()
-	
+		print(mtype,ret)
 
-	def send_challenge(self) -> None:
+	
+	
+	def process_client_access_control(self,message) -> bool:
+		
+		self.state = STATE_CLIENT_ACCESS_CONTROL
+		
+		challenge = message['challenge'].encode('iso-8859-1')
+		
+		nonce = message['nonce']
+				
+		if security.verify_challenge_serial_number(self.allowed_users,nonce,challenge) != True:
+
+			return False
+
+		message = {'type':'OK'}
+		
+		self._send(message)
+		
+		return True
+		
+			
+		
+	
+	def send_server_access_control(self) -> bool:
+		
+		server_cert = security.load_cert('server_cert.pem')[0]
+		
+		digest = security.hash_fingerprint(server_cert)
+				
+		message = {'type':'SERVER_ACCESS_CONTROL','digest':digest}
+		
+		self.state = STATE_SERVER_ACCESS_CONTROL
+		
+		self._send(message)
+		
+		return True
+
+
+	def send_challenge(self) -> bool:
 		"""Create challenge and send 
 			it to the client
 		"""
@@ -157,9 +228,12 @@ class ClientHandler(asyncio.Protocol):
 		
 		self._send(message)
 		
+		self.state = STATE_CHAP
+		
 		return True
 		
-		
+	
+	
 	
 		
 	def process_challenge(self,message) -> bool:
@@ -204,18 +278,74 @@ class ClientHandler(asyncio.Protocol):
 		
 		self.raiz = security.generate_raiz()
 		
-		message['raiz'] = self.raiz
+		raiz = self.raiz.decode('iso-8859-1')
+		
+		message['raiz'] = raiz
 		
 		self._send(message)
 		
+		self.state = STATE_AUTH_OTP
+
 		return True
 
 	def process_citizen_card_authentication(self,message) -> bool:
 		#client citizen card signature
-		signature = message['signature']
-		#load citizen card public key
-		public_key = security.
+		signature = bytes(message['signature'], encoding='iso-8859-1')
+		#content that was signed by citizen card
+		content = message['content'].encode('iso-8859-1')
+
+		#load trusted_certificates
+		trusted_certificates =   security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
+		#load client certificates
+		certificates = message['certificates']
 		
+		certificates = [ cert.encode('iso-8859-1') for cert in certificates]
+		
+		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]
+		#build certification chain
+		chain = security.build_certification_chain(certificates,trusted_certificates)
+		#verify certification chain 
+		if security.valid_certification_chain(chain,[{
+			'KEY_USAGE': lambda ku: ku.value.digital_signature and ku.value.key_agreement
+		}] + [{
+			'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
+		}] * 3, check_revogation = [ True ] * 3 + [ False ]) != True:
+			return False
+	
+	
+		#verify signature 
+		if security.verify(certificates[0],signature,content) != True:
+			return False
+		
+		message = {'type': 'OK'}
+				
+		self._send(message)
+		
+		return True
+			
+	
+	def send_x509_server_authentication(self) -> bool:
+		
+		private_key = security.loadPrivateKey('server_privkey')
+		#content to signed
+		content = os.urandom(12)
+		#sign content private key 
+		signature = security.sign(private_key,content)
+		
+		#send server certificate 
+		server_cert = security.load_cert('server_cert.pem')[0]
+		
+		server_cert = security.serialize(server_cert).decode('iso-8859-1')
+		
+		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
+		
+		self._send(message)
+		
+		self.state = STATE_SERVER_CERT_AUTH
+		
+		return True
+		
+	
 	def process_otp_authentication(self,message) -> bool:
 		
 		solution = message['solution']
@@ -225,9 +355,60 @@ class ClientHandler(asyncio.Protocol):
 		
 		message = {'type':'OK'}
 		
+		self.index = self.index+1
+		
+		self._send(message)
+		
+		return True
+	
+	
 		
 		
-			
+	def send_assymetric_key_authentication(self) -> bool:
+		
+		"""
+		Server sends a request to the client to authenticate
+		Using the clients rsa public key it encrypts the value
+		Finnaly it hashes the original nonce value for authentication
+		""" 
+		
+		nonce = os.urandom(12)
+		
+		enc_nonce = security.encrypt(self.client_rsa_public_key,nonce)[0]
+		
+		digest = security.hash(nonce)
+		
+		message = {'type': 'SERVER_RSA_AUTH','nonce':enc_nonce.decode('iso-8859-1'),'digest':digest.decode('iso-8859-1')}
+		
+		self._send(message)
+		
+		self._state = STATE_SERVER_RSA_AUTH
+		
+		
+	def process_client_asym_key_authentication(self,message) -> bool:
+		
+		"""
+		Client receives an auth request
+		Using its private asym key decrypts the nonce 
+		Generates the hash with decrypted nonce and compares with digest sent
+		"""
+		
+		client_digest = message['digest'].encode('iso-8859-1')
+		
+		enc_nonce = message['nonce'].encode('iso-8859-1')
+		
+		nonce = security.decrypt(self.rsa_private_key,enc_nonce)[0]
+		
+		digest = security.hash(nonce)
+		
+		if client_digest != digest : 
+			return False
+		
+		self.send_assymetric_key_authentication()
+		
+		return True
+		
+		
 	def process_negotiation(self, message: str) -> bool:
 		"""
 		Processes an NEGOTIATION message from the client
@@ -344,7 +525,8 @@ class ClientHandler(asyncio.Protocol):
 
 		# Only chars and letters in the filename
 		file_name = re.sub(r'[^\w\.]', '', message['file_name'])
-		file_path = os.path.join(self.storage_dir, file_name)
+		file_path = os.path.join(self.storage_dir, file_name)		
+
 
 		
 		if not os.path.exists("files"):

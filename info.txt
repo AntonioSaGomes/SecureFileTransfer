@@ -1,0 +1,16 @@
+
+
+Servidor autentica cliente 
+	cliente envia algo assinado com o cartao de cidadão
+	servidor decripta a assinatura e compara o conteudo assinado
+
+Cliente autentica servidor 
+	Servidor envia algo assinado usando a chave privada do certificado
+	cliente decripta usando a chave publica e compara o conteudo assinado
+	
+
+Controlo de acesso 
+	Servidor possui os numeros dos cartoẽs de cidadão dos clientes que podem ser autenticados
+	
+	Cliente possui a fingerprint dos certificados dos servidores que podem ser autenticados
+	

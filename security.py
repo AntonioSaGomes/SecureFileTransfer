@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from cryptography.hazmat.primitives.ciphers.base import _CipherContext
+from cryptography.hazmat.backends.openssl.x509 import _Certificate
+from cryptography.hazmat.backends.openssl.rsa import _RSAPublicKey
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
@@ -13,10 +15,15 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import asymmetric
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.fernet import Fernet
+import cryptography
 import os,PyKCS11,sys
+import urllib
+import urllib.request
+from cryptography import x509
 from cryptography.x509 import *
 from cryptography.x509.oid import *
 import json
+import datetime
 
 backend = default_backend()
 
@@ -41,16 +48,20 @@ class Cript():
 
 class CitizenCard():
 	
-	def __init(self):
+	def __init__(self):
 		self.name = None
 		self.slot = pkcs11.getSlotList()[0]
 		self.session = pkcs11.openSession(self.slot)
 	
-	def get_name():
-		if self.name is None:
-			certificate, *_ = self.get_x509_certificates()
-			self.name = certificate.subject.get_attributes_for_oid(NameOID.COMON_NAME)[0].value
+	def get_name(self):
+		certificate, *_ = self.get_x509_certificates()
+		self.name = certificate.subject.get_attributes_for_oid(NameOID.COMON_NAME)[0].value
 		return self.name
+	
+	def get_id_number(self):
+		certificate, *_ = self.get_x509_certificates()
+		self.id_number = certificate.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)[0].value
+		return self.id_number 
 	
 	def get_certificates(self):
 		certificates = list()
@@ -61,17 +72,20 @@ class CitizenCard():
 			if attributes['CKA_CERTIFICATE_TYPE'] != None:
 				certificates.append(bytes(attributes['CKA_VALUE']))
 		return certificates
-		
+	
+	def get_public_key_cert(self):
+		return session.findObjects([
+					(PyKCS11.CKA_CLASS,1),
+					(PyKCS11.CKA_LABEL,'CITIZEN AUTHENTICATION CERTIFICATE')
+				])[0]
 	
 	def get_x509_certificates(self,backend = backend, **kwargs):
 		certificates = [ load_der_x509_certificate(certificate,backend) for certificate in self.get_certificates() ]
-		
 		for key,value in kwargs.items():
 			if key in dir(ExtensionOID):
 				certificates = [ certificate for certificate in certificates if value(certificate.extensions.get_extension_for_oid(getattr(ExtensionOID, key))) ] 
 			elif key in dir(NameOID):
 				certificates = [ certificate for certificate in certificates if value(certificate.subject.get_attributes_for_oid(getattr(NameOID, key))) ] 
-		
 		return certificates
 	
 	def get_x509_certification_chains(self, backend = backend, **kwargs):
@@ -88,10 +102,10 @@ class CitizenCard():
 		
 		
 		
-	def get_public_key(self, transformation = lambda key: serialization.load_der_public_key(bytes(key.to_dict()['CKA_VALUE'])), backend=backend):
+	def get_public_key(self, transformation = lambda key: serialization.load_der_public_key(bytes(key.to_dict()['CKA_VALUE']), backend=backend)):
 		return transformation(self.session.findObjects([
 			(PyKCS11.CKA_CLASS, PyKCS11.CKO_PUBLIC_KEY),
-			 (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')
+			(PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')
 			])[0])
 	
 	def get_private_key(self):
@@ -103,20 +117,25 @@ class CitizenCard():
 	def sign(self, content, mechanism = PyKCS11.CKM_SHA1_RSA_PKCS,param= None):
 		return self.session.sign(self.get_private_key(),content, PyKCS11.Mechanism(mechanism, param)), mechanism, param
 		
-	def verify(key, signature, content, padder = asymmetric.padding.PKCS1v15(), hash = hashes.SHA1(), backend = backend):
-		if type(key) == str:
-			with open(key,'rb') as fin:
-				key = deserialize(fin.read(), load_pem_x509_certificate)
-		if type(key) == bytes:
-			key = serialization.load_der_public_key(key, backend= backend)
-		if type(key) == _Certificate:
-			key = key.public_key()
-		try:
-			key.verify(signature,content,padder,hash)
-		except cryptography.exceptions.InvalidSignature:
-			return False
-		return True
-		
+
+def sign(key, content, padding = asymmetric.padding.PKCS1v15(), algorithm = hashes.SHA1()):
+    if type(key) == str:
+        key = get_private_key(key)
+    return key.sign(content, padding, algorithm)
+
+def verify(key, signature, content, padder = asymmetric.padding.PKCS1v15(), hash = hashes.SHA1(), backend = backend):
+	if type(key) == str:
+		with open(key,'rb') as fin:
+			key = deserialize(fin.read(), load_pem_x509_certificate)
+	if type(key) == bytes:
+		key = serialization.load_der_public_key(key, backend= backend)
+	if type(key) == _Certificate:
+		key = key.public_key()
+	try:
+		key.verify(signature,content,padder,hash)
+	except cryptography.exceptions.InvalidSignature:
+		return False
+	return True
 		
 def load_cert(path, loader = load_pem_x509_certificate, backend = backend):
 	if os.path.isfile(path):
@@ -256,9 +275,21 @@ def store_private_key(private_key,filename):
 		encoding=serialization.Encoding.PEM,
 		format=serialization.PrivateFormat.TraditionalOpenSSL,
 		encryption_algorithm=serialization.NoEncryption()
-	)
+		)
 		key_file.write(pem)
+	key_file.close()
 
+
+def store_public_key(public_key,filename):
+	"""
+	Open a PEM file and writes the public key in it
+	"""
+	with open(str(filename) +'_pub_key.pem','wb') as fin:
+		pem = public_key.public_bytes(
+		encoding=serialization.Encoding.PEM,
+		format=serialization.PublicFormat.SubjectPublicKeyInfo
+		)
+		fin.write(pem)
 
 
 def load_private_key(filename):
@@ -271,6 +302,24 @@ def load_private_key(filename):
 		password=None,
 		backend=default_backend()
 	)
+
+def load_public_key(filename):
+	"""
+	Loads and returns the pub key from the PEM file
+	"""
+	with open(str(filename) + "_pub_key.pem", "rb") as key_file:
+		return serialization.load_pem_public_key(
+		key_file.read(),
+		backend=default_backend()
+	)
+
+def loadPrivateKey(filename):
+    with open(str(filename) + ".pem", "rb") as key_file:
+        return serialization.load_pem_private_key(
+            key_file.read(),
+            password=None,
+            backend=default_backend()
+        )
 
 
 def encrypt(encryptor, data, algorithm = asymmetric.padding.OAEP, hashing = hashes.SHA256, mgf = asymmetric.padding.MGF1, label = None):
@@ -349,10 +398,15 @@ def challenge() :
 	"""
 		Create CHAP for client
 		(Challenge handshake authentication protocol)
+		(Challenge handshake authentication protocol)
 	""" 
 	return [random.randint(1,9) for i in range(5)]
 
 
+def rsa_asym_key_challenge(pub_key,nonce):
+	
+	return hash(pub_key.encrypt(nonce))
+	
 
 	
 def solve_challenge():
@@ -443,6 +497,7 @@ def deserializeParameters(string, bc = backend):
 	return serialization.load_pem_parameters(string , backend = bc)
 
 
+
 def shared_key(private_key,public_key):
 	"""
 	Returns a shared key that comes from the private and public key (DH)
@@ -507,6 +562,23 @@ def derive_key(shared_key,algorithm):
 	return derived_key
 
 
+def serialize(key, encoding = serialization.Encoding.PEM, **kwargs):
+    if type(key) == _Certificate:
+        return key.public_bytes(encoding = encoding)
+    elif type(key) == _RSAPublicKey:
+        return key.public_bytes(encoding = encoding, format = kwargs['format'] if 'format' in kwargs else serialization.PublicFormat.SubjectPublicKeyInfo)
+    else:
+        return key.private_bytes(encoding = encoding, format = kwargs['format'] if 'format' in kwargs else serialization.PrivateFormat.TraditionalOpenSSL, encryption_algorithm = kwargs['encryption_algorithm'] if 'encryption_algorithm' in kwargs else serialization.NoEncryption())
+
+def deserialize(key, encoding = serialization.Encoding.PEM, backend = backend, **kwargs):
+    if callable(encoding):
+        deserialization_function = encoding
+    elif encoding == serialization.Encoding.PEM:
+        deserialization_function = serialization.load_pem_public_key
+    else:
+        deserialization_function = serialization.load_der_public_key
+    return deserialization_function(key, backend = backend, **kwargs)
+
 def decrypt(decryptor, data, algorithm = asymmetric.padding.OAEP, hashing = hashes.SHA256, mgf = asymmetric.padding.MGF1, label = None):
 	if hashing == 'SHA256':
 		hashing = hashes.SHA256()
@@ -527,7 +599,96 @@ def decrypt(decryptor, data, algorithm = asymmetric.padding.OAEP, hashing = hash
 	else:
 		return decryptor.decrypt(data, algorithm(mgf = mgf(algorithm = hashing()), algorithm = hashing(), label = label)), algorithm, hashing, mgf, label
 
+def revogation_status(certificate, backend = backend):
+    return int(any([ certificate.serial_number in [ rc.serial_number for rc in crl ] for crl in load_crls(certificate, backend) ]))
 
+
+def valid_attributes(certificate, kwargs):
+	for key, value in kwargs.items():
+		if key in dir(ExtensionOID):
+			obj = certificate.extensions.get_extension_for_oid(getattr(ExtensionOID, key))
+			print (obj)
+		elif key in dir(NameOID):
+			print("got here also for some reason")
+			obj = certificate.extensions.get_extension_for_oid(getattr(NameOID, key))
+		else:
+			print("here")
+			continue
+		if not value(obj):
+			print ("not valid_attributes")
+			return False
+	return True
+
+
+def not_expired(certificate):
+	now = datetime.datetime.now()
+	return now >= certificate.not_valid_before and now <= certificate.not_valid_after
+
+def load_crls(certificate, backend = backend):
+    try:
+        crlDistributionPoints = certificate.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+        crlDistributionPoints = crlDistributionPoints.value
+        crlDistributionPoints = [ obj.value for crlDistributionPoint in crlDistributionPoints for obj in crlDistributionPoint.full_name if type(obj) == x509.general_name.UniformResourceIdentifier ]
+        return [ load_der_x509_crl(urllib.request.urlopen(crlDistributionPoint).read(), backend) for crlDistributionPoint in crlDistributionPoints ]
+    except ExtensionNotFound:
+        return [ ]
+        
+def valid_certification_chain(certification_chain, vkwargs, backend = backend, check_revogation = None):
+	"""
+	Validates a certification chain
+	"""
+
+	if check_revogation is None:
+		check_revogation = [ True ] * len(certification_chain)
+	if not all([ (not to_revokate or revogation_status(certificate, backend) == 0) and not_expired(certificate) and valid_attributes(certificate, kwargs) for certificate, kwargs, to_revokate in zip(certification_chain, vkwargs, check_revogation) ]):
+		return False
+	for i in range(len(certification_chain) - 1):
+		try:
+			certificate0, certificate1 = certification_chain[i], certification_chain[i + 1]
+			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)
+		except cryptography.exceptions.InvalidSignature:
+			return False
+	if certification_chain[-1].subject == certification_chain[-1].issuer:
+		try:
+			certificate0, certificate1 = certification_chain[-1], certification_chain[-1]
+			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)
+		except cryptography.exceptions.InvalidSignature:
+			return False
+	return True
+
+
+def challenge_serial_number(serial_number,nonce):
+	"""
+	The entity creates a challenge to be sent to the other entity
+	:param cert : certificate
+	:param nonce: bytes
+	"""
+	to_hash = (serial_number+nonce).encode('iso-8859-1')
+	digest = hash(to_hash)
+	challenge = hash(digest)
+	return challenge
+
+def verify_challenge_serial_number(serial_list,nonce,challenge):
+	"""
+	The entity creates a challenge to be sent to the other entity
+	:param cert : certificate
+	:param nonce: bytes
+	"""
+	to_hash_list = [(serial_number+nonce).encode('iso-8859-1') for serial_number in serial_list]
+	digests = [hash(to_hash) for to_hash in to_hash_list]
+	challenges = [ hash(digest) for digest in digests ]
+	return challenges not in challenges
+	
+def hash_fingerprint(cert):
+	digest = hash(cert.fingerprint(hashes.SHA256())).decode('iso-8859-1')
+	return digest
+
+def verify_hashes(digesto,fingerprints):
+	digests = [ hash(digest) for digest in fingerprints ]
+	if digesto not in digests:
+		return True
+	return False
+	
 def hash(data, size = 512, algorithm = hashes.SHA512(), backend = backend):
 	"""
 	Very well known hash function - SHA - in the cryptographic world
