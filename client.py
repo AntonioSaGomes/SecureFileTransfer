@@ -78,10 +78,10 @@ class ClientProtocol(asyncio.Protocol):
 		:return:
 		"""
 		
+		logger.debug('Received: {}'.format(data))
+
 		data = security.fernet_decript(self.fernet_key,data)
 
-		logger.debug('Received: {}'.format(data))
-	
 		
 		try:
 			self.buffer += data.decode()
@@ -141,11 +141,10 @@ class ClientProtocol(asyncio.Protocol):
 			ret = self.process_x509_server_authentication(message)
 			
 		elif mtype == 'SERVER_RSA_AUTH':
-			self.process_server_asym_key_authentication(message)
-		
-		elif mtype == 'DATA':
-			self.send_file(self.file_name)
-		
+			ret = self.process_server_asym_key_authentication(message)
+			if ret:
+				self.send_file(self.file_name)
+
 		elif mtype == 'CITIZEN_CARD_AUTH':
 			self.send_citizen_card_auth()
 			
@@ -159,7 +158,6 @@ class ClientProtocol(asyncio.Protocol):
 			elif self.state == STATE_NEGOTIATION:
 				self.send_exchange(message)
 			elif self.state == STATE_CHAP:
-				#go to otp_auth
 				self.send_start_otp_auth()	
 			elif self.state == STATE_AUTH_PASS:
 				pass
@@ -201,7 +199,11 @@ class ClientProtocol(asyncio.Protocol):
 
 	def send_client_acess_control(self):
 		
-	
+		"""
+		Client sends a challenge to check if the server can access client.
+		Sends a challenge with the client's CC id number and a nonce value
+		"""
+		
 		serial_number = self.citizen_card.get_id_number()
 		
 		nonce = os.urandom(12).decode('iso-8859-1')
@@ -217,17 +219,20 @@ class ClientProtocol(asyncio.Protocol):
 	
 	def process_server_access_control(self,message) -> bool:
 		
-
+		"""
+			Client verifies if the server can access the client
+			Checks if the the digest sent by the server is 
+			a product of the hash of server cert fingerprint
+		"""
+			
 		self.state = STATE_SERVER_ACCESS_CONTROL
 		
 		digest = message['digest']
 		
-		print(security.verify_hashes(digest,self.cert_fingerprints))	
 		if security.verify_hashes(digest,self.cert_fingerprints) != True:
 
 			return False
 		
-	
 		message = {'type':'OK'}
 		
 		self._send(message)
@@ -248,63 +253,51 @@ class ClientProtocol(asyncio.Protocol):
 		message = {'type':'OTP_AUTH'}
 		self._send(message)
 	
+		
+	def send_challenge_solution(self,message: str) -> None:
+		"""
+		Send client CHAP challenge authentication 
+		solution to the server
+		"""
+		challenge = message['challenge'].encode('iso-8859-1')
+		nonce = os.urandom(12).decode("iso-8859-1")			
+		solution = security.solvePasswordChallenge(self.password,challenge,nonce)
+		solution = security.encrypt(self.server_pub_key,solution)[0]
+		message = {'type':'CHAP','nonce':nonce,'solution':solution.decode("iso-8859-1")}
+		self._send(message)
+		self.state = STATE_CHAP
 	
 					
 	def send_otp_solution(self,message: str) -> None:
-		
 		"""
-		Send client otp authentication 
-		
+		Send client otp authentication solution
+		to the server
 		"""
-
-		raiz = message['raiz'] 
-		
+		raiz = message['raiz'] 	
 		indice = message['indice']
-		 
 		solution = security.otp(index= indice-1,root= raiz, password=self.password).decode('iso-8859-1')
-		
-		message = {'type':'OTP_AUTH', 'solution':solution}
-		
+		solution = security.encrypt(self.server_pub_key,solution)[0]
+		message = {'type':'OTP_AUTH', 'solution':solution.decode("iso-8859-1") }
 		self._send(message)
-		
 		self.state = STATE_AUTH_OTP
 				
 		
-	def send_pass_auth(self) -> None:
-		
-		password = input("Authentication password: ") 
-		
-		message = {'type': 'AUTH_PASS', 'password':password}
-		
-		self._send(message)
-		
-		self.state = STATE_AUTH_PASS
 	
 	
-	def send_citizen_card_auth(self) -> None:
-		
+	def send_citizen_card_auth(self) -> None:	
 		#read Citizen card
 		self.citizen_card = security.CitizenCard()
-		
 		security.store_public_key(self.citizen_card.get_public_key(),"client")
-		
 		#content to be signed
 		content = os.urandom(12)
-		
 		#sign content private key from citizenCard
 		self.signature = self.citizen_card.sign(content)[0]
-		
 		signature = bytes(self.signature)
-		
 		#need to send certificate chain
-		chain = self.citizen_card.get_x509_certification_chains()[0]
-		
-		certificates = [security.serialize(certificate).decode('iso-8859-1') for certificate in chain]
-		
-		message = {'type': 'CITIZEN_CARD_AUTH', 'signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'), 'certificates':certificates}
-		
-		self._send(message)
-		
+		chain = self.citizen_card.get_x509_certification_chains()[0]		
+		certificates = [security.serialize(certificate).decode('iso-8859-1') for certificate in chain]	
+		message = {'type': 'CITIZEN_CARD_AUTH', 'signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'), 'certificates':certificates}	
+		self._send(message)	
 		self.state = STATE_AUTH_CARD
 	
 	
@@ -314,12 +307,9 @@ class ClientProtocol(asyncio.Protocol):
 		#content that was signed by server cert priv_key
 		content = message['content'].encode('iso-8859-1')
 		#server certificate
-		certificate = message['server_cert'].encode('iso-8859-1')
-		
-		certificate = security.deserialize(certificate, security.load_pem_x509_certificate) 
-		
+		certificate = message['server_cert'].encode('iso-8859-1')		
+		certificate = security.deserialize(certificate, security.load_pem_x509_certificate) 		
 		self.server_pub_key = certificate.public_key()
-
 		#load trusted_certificates
 		trusted_certificates =  security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
 		#build certification chain
@@ -400,24 +390,7 @@ class ClientProtocol(asyncio.Protocol):
 		self._send(message)
 
 		self.state = STATE_EXCHANGE
-	
-	def send_challenge_solution(self,message: str) -> None:
-		
-		challenge = message['challenge'].encode('iso-8859-1')
-		
-		nonce = os.urandom(12).decode("iso-8859-1")
 				
-		solution = security.solvePasswordChallenge(self.password,challenge,nonce)
-		
-		solution = security.encrypt(self.server_pub_key,solution)[0]
-		
-		message = {'type':'CHAP','nonce':nonce,'solution':solution.decode("iso-8859-1")}
-		
-		self._send(message)
-		
-		self.state = STATE_CHAP
-		
-		
 	def send_dh_exchange(self,message: str) -> None:
 		
 		server_rsa_public_key = message['server_rsa_public_key']
@@ -478,7 +451,7 @@ class ClientProtocol(asyncio.Protocol):
 		"""
 		Client receives an auth request
 		Using its private asym key decrypts the nonce 
-		Generates the hash with decrypted nonce and compares with digest sent
+		Generates the hash with decrypted nonce and compares with digest received.
 		"""
 		
 		server_digest = message['digest'].encode('iso-8859-1')
@@ -491,8 +464,6 @@ class ClientProtocol(asyncio.Protocol):
 		
 		if server_digest != digest : 
 			return False
-		
-		self.send_citizen_card_auth()
 		
 		return True
 		

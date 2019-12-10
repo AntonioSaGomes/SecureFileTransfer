@@ -78,10 +78,9 @@ class ClientHandler(asyncio.Protocol):
         :return:
         """
         
-		data = security.fernet_decript(self.fernet_key,data)
-
 		logger.debug('Received: {}'.format(data))
 
+		data = security.fernet_decript(self.fernet_key,data)
 
 		try:
 			self.buffer += data.decode()
@@ -188,8 +187,12 @@ class ClientHandler(asyncio.Protocol):
 
 	
 	
-	def process_client_access_control(self,message) -> bool:
-		
+	def process_client_access_control(self,message) -> bool:		
+		"""
+			Server verifies if client can access the server
+			Solves the challenge and compares with the one 
+			sent by the client
+		"""	
 		self.state = STATE_CLIENT_ACCESS_CONTROL
 		
 		challenge = message['challenge'].encode('iso-8859-1')
@@ -208,38 +211,30 @@ class ClientHandler(asyncio.Protocol):
 		
 
 	def send_server_access_control(self) -> bool:
-		
+		"""
+			Sends an access control challenge to the client
+			It uses its own certificate fingerprint and generates a digest
+			that is sent to the client.
+		"""
 		server_cert = security.load_cert('server_cert.pem')[0]
-		
-		digest = security.hash_fingerprint(server_cert)
-				
-		message = {'type':'SERVER_ACCESS_CONTROL','digest':digest}
-		
+		challenge = security.hash_fingerprint(server_cert)
+		message = {'type':'SERVER_ACCESS_CONTROL','digest':challenge}
 		self.state = STATE_SERVER_ACCESS_CONTROL
-		
 		self._send(message)
-		
 		return True
 
-	def send_x509_server_authentication(self) -> bool:
-		
+	def send_x509_server_authentication(self) -> bool:		
 		self.private_key = security.loadPrivateKey('server_privkey')
 		#content to signed
 		content = os.urandom(12)
 		#sign content private key 
-		signature = security.sign(self.private_key,content)
-		
+		signature = security.sign(self.private_key,content)		
 		#send server certificate 
-		server_cert = security.load_cert('server_cert.pem')[0]
-		
-		server_cert = security.serialize(server_cert).decode('iso-8859-1')
-		
+		server_cert = security.load_cert('server_cert.pem')[0]		
+		server_cert = security.serialize(server_cert).decode('iso-8859-1')	
 		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
-		
 		self._send(message)
-		
 		self.state = STATE_SERVER_CERT_AUTH
-		
 		return True
 	
 	
@@ -250,19 +245,11 @@ class ClientHandler(asyncio.Protocol):
 		#content that was signed by citizen card
 		content = message['content'].encode('iso-8859-1')
 		#load trusted_certificates
-		trusted_certificates =   security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 
-		
+		trusted_certificates =   security.load_cert('PTEID.pem') + security.load_cert('ca.pem') 		
 		#load client certificates
-		certificates = message['certificates']	
-			
+		certificates = message['certificates']			
 		certificates = [ cert.encode('iso-8859-1') for cert in certificates]
-		
-		
-		
-		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]
-		
-		#pub key used for further encryption
-		self.client_certificate_pub_key = certificates[0].public_key()
+		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]		
 		#build certification chain
 		chain = security.build_certification_chain(certificates,trusted_certificates)
 		#verify certification chain 
@@ -272,16 +259,11 @@ class ClientHandler(asyncio.Protocol):
 			'KEY_USAGE': lambda ku: ku.value.key_cert_sign and ku.value.crl_sign
 		}] * 3, check_revogation = [ True ] * 3 + [ False ]) != True:
 			return False
-	
-	
 		#verify signature 
 		if security.verify(certificates[0],signature,content) != True:
 			return False
-		
-		message = {'type': 'OK'}
-				
+		message = {'type': 'OK'}	
 		self._send(message)
-		
 		return True
 			
 	
@@ -290,93 +272,58 @@ class ClientHandler(asyncio.Protocol):
 		"""Create challenge and send 
 			it to the client
 		"""
-		
 		self.challenge = security.create_challenge()
-		
-		
 		message = {'type':'CHAP','challenge':self.challenge.decode('iso-8859-1')}
-		
-		self._send(message)
-		
+		self._send(message)	
 		self.state = STATE_CHAP
-		
 		return True
 		
-	
-	
-	
-		
+
 	def process_challenge(self,message) -> bool:
 		"""
-			Returns true if the attemp corresponds 
-			to the solution
+			Returns true if the attemp sent by the 
+			client corresponds to the solution expected
 		"""
 		nonce = message['nonce']
-		
-		solution = message['solution'].encode('iso-8859-1')
-		
-		solution = security.decrypt(self.private_key,solution)[0]
-		
+		solution = message['solution'].encode('iso-8859-1')		
+		solution = security.decrypt(self.private_key,solution)[0]	
 		if security.verifyPasswordChallenge(self.password,self.challenge,nonce,solution) != True : 
-			print("False")
-			return False
-			
-		message = {'type': 'OK'}
-		
+			return False		
+		message = {'type': 'OK'}	
 		self._send(message)
-		
 		return True
 	
-	def process_password_authentication(self,message) -> bool:
-		"""
-			Returns true if the client send back the 
-			password to access the server 
-		"""
-		password = message['password']
-		
-		if password == self.password != True:
-			return False
-		
-		message = {'type': 'OK'}
 
-		self._send(message)
-		
-		return True
-		
-
-	def send_otp_authentication(self) -> bool:
-		
-		message = {'type':'OTP_AUTH','indice':None , 'raiz':None}
-		
+	def send_otp_authentication(self) -> bool:	
+		"""
+		Sends an one time password authentication
+		request with some arguments used for to 
+		solve the challenge.	
+		"""
+		message = {'type':'OTP_AUTH','indice':None ,'raiz':None}	
 		message['indice'] = self.index
-		
 		self.raiz = security.generate_raiz()
-		
 		raiz = self.raiz.decode('iso-8859-1')
-		
 		message['raiz'] = raiz
-		
 		self._send(message)
-		
 		self.state = STATE_AUTH_OTP
-
 		return True
 
 		
 	
 	def process_otp_authentication(self,message) -> bool:
-		
-		solution = message['solution']
-		
+		"""
+			Returns true if the attemp sent by the 
+			client corresponds to the solution expected
+		"""
+		solution = message['solution'].encode('iso-8859-1')		
+		solution = security.decrypt(self.private_key,solution)[0]		
 		if solution == security.otp(index=self.index,root=self.raiz,password=self.password) != True:
 			return False
-		
 		message = {'type':'OK'}
-		
+		#generate new random index for next authentication
 		self.index = random.randint(3,9)
-		
 		self._send(message)
-		
 		return True
 	
 	
@@ -664,6 +611,7 @@ class ClientHandler(asyncio.Protocol):
 		logger.debug("Send: {}".format(message_b))
 
 		self.transport.write(message_b)
+
 
 def main():
 	global storage_dir
