@@ -429,9 +429,6 @@ def solvePasswordChallenge(password,challenge,nonce):
 	Takes a password know by booth the server and client and nonce value 
 	that is sent over the channel as part of the challenge
 	"""
-	print ("password: " + password)
-	print ("challenge: " + str(challenge))
-	print ("nonce: " + str(nonce))
 	
 	data = (password  +str(challenge) + str(nonce)).encode("utf8")
 	return hash(data= data)
@@ -635,21 +632,24 @@ def valid_certification_chain(certification_chain, vkwargs, backend = backend, c
 	"""
 	Validates a certification chain
 	"""
-
 	if check_revogation is None:
 		check_revogation = [ True ] * len(certification_chain)
-	if not all([ (not to_revokate or revogation_status(certificate, backend) == 0) and not_expired(certificate) and valid_attributes(certificate, kwargs) for certificate, kwargs, to_revokate in zip(certification_chain, vkwargs, check_revogation) ]):
+	if not all([ (not to_revokate or revogation_status(certificate, backend) == 0) 
+		and not_expired(certificate) and valid_attributes(certificate, kwargs) 
+		for certificate, kwargs, to_revokate in zip(certification_chain, vkwargs, check_revogation) ]):
 		return False
 	for i in range(len(certification_chain) - 1):
 		try:
 			certificate0, certificate1 = certification_chain[i], certification_chain[i + 1]
-			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)
+			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, 
+			asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)		
 		except cryptography.exceptions.InvalidSignature:
 			return False
 	if certification_chain[-1].subject == certification_chain[-1].issuer:
 		try:
 			certificate0, certificate1 = certification_chain[-1], certification_chain[-1]
-			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)
+			certificate1.public_key().verify(certificate0.signature, certificate0.tbs_certificate_bytes, 
+			asymmetric.padding.PKCS1v15(), certificate0.signature_hash_algorithm)
 		except cryptography.exceptions.InvalidSignature:
 			return False
 	return True

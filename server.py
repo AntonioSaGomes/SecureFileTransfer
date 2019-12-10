@@ -232,7 +232,8 @@ class ClientHandler(asyncio.Protocol):
 		#send server certificate 
 		server_cert = security.load_cert('server_cert.pem')[0]		
 		server_cert = security.serialize(server_cert).decode('iso-8859-1')	
-		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
+		message = {'type':'SERVER_CERT_AUTH','signature': signature.decode('iso-8859-1'),
+		 'content':content.decode('iso-8859-1'),'server_cert':server_cert}
 		self._send(message)
 		self.state = STATE_SERVER_CERT_AUTH
 		return True
@@ -249,7 +250,8 @@ class ClientHandler(asyncio.Protocol):
 		#load client certificates
 		certificates = message['certificates']			
 		certificates = [ cert.encode('iso-8859-1') for cert in certificates]
-		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) for certificate in certificates]		
+		certificates = [ security.deserialize(certificate, security.load_pem_x509_certificate) 
+						for certificate in certificates]		
 		#build certification chain
 		chain = security.build_certification_chain(certificates,trusted_certificates)
 		#verify certification chain 

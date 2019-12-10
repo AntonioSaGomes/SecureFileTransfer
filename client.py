@@ -78,9 +78,10 @@ class ClientProtocol(asyncio.Protocol):
 		:return:
 		"""
 		
-		logger.debug('Received: {}'.format(data))
 
 		data = security.fernet_decript(self.fernet_key,data)
+
+		logger.debug('Received: {}'.format(data))
 
 		
 		try:
@@ -198,45 +199,31 @@ class ClientProtocol(asyncio.Protocol):
 		self._send(message)
 
 	def send_client_acess_control(self):
-		
 		"""
 		Client sends a challenge to check if the server can access client.
-		Sends a challenge with the client's CC id number and a nonce value
-		"""
-		
-		serial_number = self.citizen_card.get_id_number()
-		
-		nonce = os.urandom(12).decode('iso-8859-1')
-		
-		challenge = security.challenge_serial_number(serial_number,nonce)
-		
-		message = {"type": "CLIENT_ACCESS_CONTROL", 'challenge':challenge.decode('iso-8859-1'),'nonce':nonce}
-		
+		Sends a challenge with the client's CC id number that is read from
+		the CC and a nonce value
+		"""	
+		serial_number = self.citizen_card.get_id_number()	
+		nonce = os.urandom(12).decode('iso-8859-1')	
+		challenge = security.challenge_serial_number(serial_number,nonce)	
+		message = {"type": "CLIENT_ACCESS_CONTROL", 'challenge':challenge.decode('iso-8859-1'),'nonce':nonce}	
 		self._send(message)
-		
 		self.state = STATE_CLIENT_ACCESS_CONTROL
 	
 	
-	def process_server_access_control(self,message) -> bool:
-		
+	def process_server_access_control(self,message) -> bool:		
 		"""
 			Client verifies if the server can access the client
 			Checks if the the digest sent by the server is 
 			a product of the hash of server cert fingerprint
-		"""
-			
-		self.state = STATE_SERVER_ACCESS_CONTROL
-		
-		digest = message['digest']
-		
+		"""			
+		self.state = STATE_SERVER_ACCESS_CONTROL		
+		digest = message['digest']		
 		if security.verify_hashes(digest,self.cert_fingerprints) != True:
-
-			return False
-		
-		message = {'type':'OK'}
-		
+			return False		
+		message = {'type':'OK'}	
 		self._send(message)
-		
 		return True
 		
 		
@@ -275,7 +262,7 @@ class ClientProtocol(asyncio.Protocol):
 		"""
 		raiz = message['raiz'] 	
 		indice = message['indice']
-		solution = security.otp(index= indice-1,root= raiz, password=self.password).decode('iso-8859-1')
+		solution = security.otp(index= indice-1,root= raiz, password=self.password)
 		solution = security.encrypt(self.server_pub_key,solution)[0]
 		message = {'type':'OTP_AUTH', 'solution':solution.decode("iso-8859-1") }
 		self._send(message)
@@ -296,7 +283,8 @@ class ClientProtocol(asyncio.Protocol):
 		#need to send certificate chain
 		chain = self.citizen_card.get_x509_certification_chains()[0]		
 		certificates = [security.serialize(certificate).decode('iso-8859-1') for certificate in chain]	
-		message = {'type': 'CITIZEN_CARD_AUTH', 'signature': signature.decode('iso-8859-1'), 'content':content.decode('iso-8859-1'), 'certificates':certificates}	
+		message = {'type': 'CITIZEN_CARD_AUTH', 'signature': signature.decode('iso-8859-1'),
+		 'content':content.decode('iso-8859-1'), 'certificates':certificates}	
 		self._send(message)	
 		self.state = STATE_AUTH_CARD
 	
@@ -519,12 +507,12 @@ class ClientProtocol(asyncio.Protocol):
 		:param message:
 		:return:
 		"""
+		logger.debug("Send: {}".format(message))
 
 		#need to encrypt message
 		message_b = (json.dumps(message) + '\r\n').encode()
 		message_b = security.fernet_encript(self.fernet_key,message_b)
 		
-		logger.debug("Send: {}".format(message_b))
 
 		self.transport.write(message_b)
 
